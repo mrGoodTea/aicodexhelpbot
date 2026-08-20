@@ -18,9 +18,14 @@ GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")  
 GROQ_SEARCH_MODEL = os.getenv("GROQ_SEARCH_MODEL", "groq/compound-mini")          # веб-поиск (встроен в Groq)
 
 # --- Лимиты и подписка ---
-FREE_REQUESTS_PER_DAY = int(os.getenv("FREE_REQUESTS_PER_DAY", "5"))
+FREE_REQUESTS_PER_DAY = int(os.getenv("FREE_REQUESTS_PER_DAY", "30"))
 SUBSCRIPTION_PRICE_STARS = int(os.getenv("SUBSCRIPTION_PRICE_STARS", "150"))
 SUBSCRIPTION_DAYS = int(os.getenv("SUBSCRIPTION_DAYS", "30"))
+
+# --- Пробный период для новых пользователей ---
+# Новый пользователь получает полный доступ ко всем платным функциям (как у подписчика)
+# на TRIAL_DAYS дней с момента первого запуска бота. Дальше — бесплатный тариф или покупка.
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
 
 # --- Администраторы бота ---
 # Юзернеймы (без @), для которых лимиты и подписка не действуют — доступ всегда безлимитный.

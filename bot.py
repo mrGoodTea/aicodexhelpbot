@@ -24,6 +24,7 @@ from config import (
     BOT_TOKEN,
     SUBSCRIPTION_PRICE_STARS,
     SUBSCRIPTION_DAYS,
+    TRIAL_DAYS,
     FREE_REQUESTS_PER_DAY,
     SHORT_HISTORY_MESSAGES,
     LONG_HISTORY_MESSAGES,
@@ -100,7 +101,7 @@ def is_admin(username: str | None) -> bool:
 
 
 def user_has_full_access(user_id: int, username: str | None) -> bool:
-    return is_admin(username) or db.is_subscriber(user_id)
+    return is_admin(username) or db.is_full_access(user_id)
 
 
 def main_menu_keyboard(full_access: bool, golden_available: bool = False) -> ReplyKeyboardMarkup:
@@ -307,7 +308,17 @@ async def cmd_start(message: Message, command: CommandObject):
 
     db.update_streak(message.from_user.id)
 
-    welcome = "Привет! Я ИИ-ассистент 🤖\n\n" f"У тебя есть {FREE_REQUESTS_PER_DAY} бесплатных запросов в день.\n"
+    welcome = "Привет! Я ИИ-ассистент 🤖\n\n"
+    if created:
+        welcome += (
+            f"🎉 Дарю тебе {TRIAL_DAYS} дня полного доступа ко ВСЕМ функциям бота — "
+            "безлимитные запросы, режимы ответа, генерация картинок, анализ фото и голоса, "
+            "работа с PDF и веб-поиск. Просто пользуйся!\n\n"
+            f"После пробного периода — {FREE_REQUESTS_PER_DAY} бесплатных запросов в день "
+            "или подписка без ограничений.\n"
+        )
+    else:
+        welcome += f"У тебя есть {FREE_REQUESTS_PER_DAY} бесплатных запросов в день.\n"
     if created and referred_by:
         welcome += f"🎁 Плюс тебе начислено +{REFERRAL_BONUS_REQUESTS} бонусных запросов за переход по ссылке друга!\n"
     welcome += "Просто напиши мне вопрос — и я отвечу.\n\nИспользуй кнопки внизу 👇"
@@ -384,6 +395,20 @@ async def cmd_status(message: Message):
         )
         return
 
+    trial_until = db.get_trial_status(user_id)
+    if trial_until:
+        mode_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
+        await message.answer(
+            f"🎉 У тебя активен пробный период — полный доступ ещё {format_time_left(trial_until)}.\n"
+            "Запросы без лимита, доступны все функции.\n"
+            f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})\n"
+            f"🔥 Стрик активности: {streak} дней подряд\n\n"
+            f"После окончания пробного периода — {FREE_REQUESTS_PER_DAY} бесплатных запросов в день, "
+            f"либо оформи подписку заранее кнопкой {BTN_BUY}.",
+            reply_markup=main_menu_keyboard(full_access),
+        )
+        return
+
     left = db.remaining_free_requests(user_id)
     bonus = db.get_bonus_requests(user_id)
     used = FREE_REQUESTS_PER_DAY - left
@@ -426,7 +451,7 @@ async def cmd_buy(message: Message):
     await message.answer(
         f"Подписка на {SUBSCRIPTION_DAYS} дней без ограничения по запросам — {price_line}.\n\n"
         "Что получаешь дополнительно:\n"
-        "• Безлимитные запросы (сейчас 5 в день)\n"
+        f"• Безлимитные запросы (сейчас {FREE_REQUESTS_PER_DAY} в день)\n"
         "• Длинная память диалога — бот помнит весь разговор\n"
         "• Генерация картинок, анализ фото, распознавание голоса\n"
         "• Загрузка PDF и база знаний (бот отвечает по твоим документам)\n"
@@ -935,6 +960,7 @@ async def process_user_query(message: Message, query_text: str):
 
     admin = is_admin(message.from_user.username)
     subscriber = db.is_subscriber(user_id)
+    full_access = admin or subscriber or db.is_trial_active(user_id)
     using_golden = user_id in golden_pending
 
     if not await check_rate_limit(message, user_id, admin):
@@ -946,7 +972,7 @@ async def process_user_query(message: Message, query_text: str):
             f"🔥 {streak} дней подряд с ботом! Начислено +{STREAK_BONUS_REQUESTS} бонусных запроса."
         )
 
-    if not admin and not subscriber:
+    if not admin and not full_access:
         newly_granted = db.maybe_grant_dynamic_discount(user_id)
         if newly_granted:
             discount, expires_at = db.get_active_discount(user_id)
@@ -959,7 +985,7 @@ async def process_user_query(message: Message, query_text: str):
                 reply_markup=buy_keyboard(),
             )
 
-    if not admin and not subscriber and not using_golden:
+    if not admin and not full_access and not using_golden:
         allowed, reason = db.can_make_request(user_id)
         if not allowed:
             if reason == "limit":
@@ -973,7 +999,7 @@ async def process_user_query(message: Message, query_text: str):
 
     await bot.send_chat_action(message.chat.id, "typing")
 
-    is_sub_like = admin or subscriber or using_golden
+    is_sub_like = full_access or using_golden
     max_history = LONG_HISTORY_MESSAGES if is_sub_like else SHORT_HISTORY_MESSAGES
 
     if not is_sub_like:
@@ -1015,7 +1041,7 @@ async def process_user_query(message: Message, query_text: str):
         )
         return
 
-    if not admin and not subscriber:
+    if not admin and not full_access:
         db.register_request(user_id)
 
         left = db.remaining_free_requests(user_id)

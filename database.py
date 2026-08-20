@@ -7,6 +7,7 @@ from config import (
     DB_PATH,
     FREE_REQUESTS_PER_DAY,
     SUBSCRIPTION_DAYS,
+    TRIAL_DAYS,
     STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     STREAK_DISCOUNT_PERCENT,
@@ -57,7 +58,8 @@ def init_db():
                 golden_query_last_used TEXT,
                 discount_percent INTEGER DEFAULT 0,
                 discount_expires_at TEXT,
-                referral_sub_bonus_given INTEGER DEFAULT 0
+                referral_sub_bonus_given INTEGER DEFAULT 0,
+                trial_until TEXT
             )
         """)
         # миграция для баз, созданных до появления новых колонок
@@ -73,6 +75,7 @@ def init_db():
             ("discount_percent", "INTEGER DEFAULT 0"),
             ("discount_expires_at", "TEXT"),
             ("referral_sub_bonus_given", "INTEGER DEFAULT 0"),
+            ("trial_until", "TEXT"),
         ]:
             _add_column_if_missing(conn, "users", col, coltype)
 
@@ -103,9 +106,10 @@ def get_or_create_user(
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         created = False
         if row is None:
+            trial_until = (datetime.now() + timedelta(days=TRIAL_DAYS)).isoformat()
             conn.execute(
-                "INSERT INTO users (user_id, username, referred_by) VALUES (?, ?, ?)",
-                (user_id, username, referred_by),
+                "INSERT INTO users (user_id, username, referred_by, trial_until) VALUES (?, ?, ?, ?)",
+                (user_id, username, referred_by, trial_until),
             )
             row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
             created = True
@@ -135,12 +139,44 @@ def is_subscriber(user_id: int) -> bool:
         return bool(row and has_active_subscription(row))
 
 
+def has_active_trial(row: sqlite3.Row) -> bool:
+    if not row["trial_until"]:
+        return False
+    return datetime.fromisoformat(row["trial_until"]) > datetime.now()
+
+
+def is_trial_active(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(row and has_active_trial(row))
+
+
+def get_trial_status(user_id: int) -> str | None:
+    """Возвращает trial_until в ISO-формате, если пробный период ещё активен, иначе None."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row and has_active_trial(row):
+            return row["trial_until"]
+        return None
+
+
+def has_full_access(row: sqlite3.Row) -> bool:
+    """Безлимитный доступ: активная подписка ИЛИ активный пробный период."""
+    return has_active_subscription(row) or has_active_trial(row)
+
+
+def is_full_access(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(row and has_full_access(row))
+
+
 def can_make_request(user_id: int) -> tuple[bool, str]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         row = _reset_if_new_day(conn, row)
 
-        if has_active_subscription(row):
+        if has_full_access(row):
             return True, ""
         if row["requests_today"] < FREE_REQUESTS_PER_DAY:
             return True, ""
@@ -154,7 +190,7 @@ def register_request(user_id: int):
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         row = _reset_if_new_day(conn, row)
 
-        if has_active_subscription(row):
+        if has_full_access(row):
             return
 
         if row["requests_today"] < FREE_REQUESTS_PER_DAY:
