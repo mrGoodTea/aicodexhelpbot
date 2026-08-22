@@ -98,6 +98,14 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                username TEXT PRIMARY KEY,
+                added_by TEXT,
+                added_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
 
 def get_or_create_user(
     user_id: int, username: str | None, referred_by: int | None = None
@@ -542,3 +550,82 @@ def search_kb(query: str, top_k: int = None) -> list[str]:
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [text for _, text in scored[:top_k]]
+
+
+# --- Админ-панель: список клиентов ---
+
+def get_all_users(limit: int = 500, offset: int = 0) -> list[sqlite3.Row]:
+    """Возвращает пользователей, отсортированных по дате регистрации (новые сверху)."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+
+
+def count_all_users() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()
+        return row["cnt"] if row else 0
+
+
+def get_admin_stats() -> dict:
+    """Сводная статистика для админ-панели."""
+    with get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        now = datetime.now().isoformat()
+        subscribers = conn.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE subscription_until IS NOT NULL AND subscription_until > ?",
+            (now,),
+        ).fetchone()["c"]
+        on_trial = conn.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE trial_until IS NOT NULL AND trial_until > ?",
+            (now,),
+        ).fetchone()["c"]
+        today = date.today().isoformat()
+        active_today = conn.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE last_active_date = ?",
+            (today,),
+        ).fetchone()["c"]
+        return {
+            "total": total,
+            "subscribers": subscribers,
+            "on_trial": on_trial,
+            "active_today": active_today,
+        }
+
+
+# --- Динамическое управление админами (добавляются владельцем через бота) ---
+
+def add_admin(username: str, added_by: str | None = None):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO admins (username, added_by) VALUES (?, ?)",
+            (username, added_by),
+        )
+
+
+def remove_admin(username: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM admins WHERE username = ?", (username,))
+
+
+def list_db_admins() -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT username FROM admins ORDER BY added_at").fetchall()
+        return [r["username"] for r in rows]
+
+
+def is_db_admin(username: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT 1 FROM admins WHERE username = ?", (username,)).fetchone()
+        return row is not None
+
+
+def get_user_id_by_username(username: str) -> int | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE username = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1",
+            (username,),
+        ).fetchone()
+        return row["user_id"] if row else None

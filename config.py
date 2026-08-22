@@ -32,9 +32,13 @@ TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
 # Можно добавить несколько через запятую в .env: ADMIN_USERNAMES=Abc123qwerty09,another_admin
 ADMIN_USERNAMES = {
     u.strip().lstrip("@")
-    for u in os.getenv("ADMIN_USERNAMES", "Abc123qwerty09").split(",")
+    for u in os.getenv("ADMIN_USERNAMES", "Abc123qwerty09,pipi725").split(",")
     if u.strip()
 }
+
+# --- Владелец бота ---
+# Единственный аккаунт, который может добавлять/убирать администраторов через админ-панель.
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "pipi725").strip().lstrip("@")
 
 # --- База данных ---
 DB_PATH = os.getenv("DB_PATH", "bot.db")
@@ -107,6 +111,11 @@ SEARCH_SYSTEM_PROMPT = (
 # --- Мультимодальность ---
 VOICE_MAX_DURATION_SECONDS = int(os.getenv("VOICE_MAX_DURATION_SECONDS", "120"))
 VISION_DEFAULT_QUESTION = "Опиши подробно, что изображено на этой картинке."
+
+# --- Видео-кружки (Telegram video note) ---
+VIDEO_NOTE_MAX_DURATION_SECONDS = int(os.getenv("VIDEO_NOTE_MAX_DURATION_SECONDS", "60"))
+VIDEO_NOTE_MAX_FILE_SIZE_MB = int(os.getenv("VIDEO_NOTE_MAX_FILE_SIZE_MB", "20"))
+VIDEO_NOTE_SIZE_PX = int(os.getenv("VIDEO_NOTE_SIZE_PX", "480"))
 
 # --- Дружелюбные извинения вместо технических ошибок ---
 FALLBACK_APOLOGIES = [
