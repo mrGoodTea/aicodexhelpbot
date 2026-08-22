@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import logging
+import os
 import random
+import tempfile
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
@@ -17,6 +19,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     BufferedInputFile,
+    FSInputFile,
 )
 from pypdf import PdfReader
 
@@ -34,6 +37,7 @@ from config import (
     REMINDER_CHECK_INTERVAL_HOURS,
     MODES,
     ADMIN_USERNAMES,
+    OWNER_USERNAME,
     STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     GOLDEN_QUERY_INTERVAL_DAYS,
@@ -49,6 +53,9 @@ from config import (
     SEARCH_COOLDOWN_SECONDS,
     VOICE_MAX_DURATION_SECONDS,
     VISION_DEFAULT_QUESTION,
+    VIDEO_NOTE_MAX_DURATION_SECONDS,
+    VIDEO_NOTE_MAX_FILE_SIZE_MB,
+    VIDEO_NOTE_SIZE_PX,
     FALLBACK_APOLOGIES,
 )
 import database as db
@@ -69,6 +76,9 @@ golden_pending: set[int] = set()                  # кто сейчас испо
 awaiting_image_prompt: set[int] = set()           # кто сейчас должен прислать описание картинки
 awaiting_search_query: set[int] = set()           # кто сейчас должен прислать поисковый запрос
 awaiting_kb_document: set[int] = set()            # админ ждём PDF для базы знаний
+awaiting_admin_broadcast: set[int] = set()        # админ пишет сообщение в общий чат админов
+awaiting_admin_dm: dict[int, int] = {}            # админ пишет личное сообщение конкретному админу (sender_id -> target_id)
+awaiting_admin_add: set[int] = set()              # владелец вводит юзернейм нового админа
 
 image_last_request_at: dict[int, datetime] = {}  # защита от слишком частых запросов картинок
 IMAGE_COOLDOWN_SECONDS = 16  # анонимный доступ Pollinations ограничен ~1 запросом/15 сек
@@ -87,7 +97,9 @@ BTN_HELP = "ℹ️ Помощь"
 BTN_MODE = "🎨 Режим"
 BTN_IMAGE = "🖼 Картинка"
 BTN_SEARCH = "🌐 Веб-поиск"
+BTN_VIDEO_CIRCLE = "⭕ Видео-кружок"
 BTN_GOLDEN = "🌟 Золотой запрос"
+BTN_ADMIN = "🛠 Админ-панель"
 
 FOMO_TEASERS = [
     "💎 В подписке ответ был бы примерно в 2 раза длиннее, с примерами кода и в режиме под задачу.",
@@ -97,19 +109,28 @@ FOMO_TEASERS = [
 
 
 def is_admin(username: str | None) -> bool:
-    return bool(username) and username in ADMIN_USERNAMES
+    if not username:
+        return False
+    if username in ADMIN_USERNAMES:
+        return True
+    return db.is_db_admin(username)
+
+
+def is_owner(username: str | None) -> bool:
+    return bool(username) and username == OWNER_USERNAME
 
 
 def user_has_full_access(user_id: int, username: str | None) -> bool:
     return is_admin(username) or db.is_full_access(user_id)
 
 
-def main_menu_keyboard(full_access: bool, golden_available: bool = False) -> ReplyKeyboardMarkup:
+def main_menu_keyboard(full_access: bool, golden_available: bool = False, username: str | None = None) -> ReplyKeyboardMarkup:
     if full_access:
         keyboard = [
             [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_MODE)],
             [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_INVITE)],
             [KeyboardButton(text=BTN_IMAGE), KeyboardButton(text=BTN_SEARCH)],
+            [KeyboardButton(text=BTN_VIDEO_CIRCLE)],
             [KeyboardButton(text=BTN_HELP)],
         ]
     else:
@@ -119,6 +140,8 @@ def main_menu_keyboard(full_access: bool, golden_available: bool = False) -> Rep
         ]
         if golden_available:
             keyboard.append([KeyboardButton(text=BTN_GOLDEN)])
+    if is_admin(username):
+        keyboard.insert(0, [KeyboardButton(text=BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, is_persistent=True)
 
 
@@ -325,7 +348,7 @@ async def cmd_start(message: Message, command: CommandObject):
 
     full_access = user_has_full_access(message.from_user.id, message.from_user.username)
     golden_available = not full_access and db.is_golden_query_available(message.from_user.id)
-    await message.answer(welcome, reply_markup=main_menu_keyboard(full_access, golden_available))
+    await message.answer(welcome, reply_markup=main_menu_keyboard(full_access, golden_available, message.from_user.username))
 
 
 @dp.message(Command("help"))
@@ -356,13 +379,13 @@ async def cmd_help(message: Message):
 
     text += "Кнопки внизу:\n" f"{BTN_STATUS} — лимит и статус подписки\n" f"{BTN_BUY} — купить подписку\n" f"{BTN_INVITE} — пригласить друга\n"
     if full_access:
-        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n"
+        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n"
     if golden_available:
         text += f"{BTN_GOLDEN} — раз в {GOLDEN_QUERY_INTERVAL_DAYS} дней попробовать бота как подписчик\n"
 
     text += f"\n/leaderboard — топ приглашающих друзей\n\nПо любым вопросам — пиши мне: @{CONTACT_USERNAME}"
 
-    await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available))
+    await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available, message.from_user.username))
 
 
 @dp.message(Command("status"))
@@ -379,7 +402,7 @@ async def cmd_status(message: Message):
         await message.answer(
             "👑 Ты администратор — безлимитный доступ навсегда.\n"
             f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})",
-            reply_markup=main_menu_keyboard(full_access),
+            reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
         )
         return
 
@@ -391,7 +414,7 @@ async def cmd_status(message: Message):
             "Запросы без лимита.\n"
             f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})\n"
             f"🔥 Стрик активности: {streak} дней подряд",
-            reply_markup=main_menu_keyboard(full_access),
+            reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
         )
         return
 
@@ -405,7 +428,7 @@ async def cmd_status(message: Message):
             f"🔥 Стрик активности: {streak} дней подряд\n\n"
             f"После окончания пробного периода — {FREE_REQUESTS_PER_DAY} бесплатных запросов в день, "
             f"либо оформи подписку заранее кнопкой {BTN_BUY}.",
-            reply_markup=main_menu_keyboard(full_access),
+            reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
         )
         return
 
@@ -431,7 +454,7 @@ async def cmd_status(message: Message):
         text += f"\n🌟 Тебе доступен золотой запрос — попробуй кнопкой {BTN_GOLDEN}\n"
 
     text += f"\nХочешь без лимита? Нажми {BTN_BUY}"
-    await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available))
+    await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available, message.from_user.username))
 
 
 @dp.message(Command("buy"))
@@ -629,7 +652,7 @@ async def process_successful_payment(message: Message):
     await message.answer(
         f"🎉 Подписка активирована! Действует до {new_until.isoformat()[:16].replace('T', ' ')}.\n"
         "Теперь запросы без лимита, и в меню появились новые кнопки — Режим, Картинка, Веб-поиск.",
-        reply_markup=main_menu_keyboard(True),
+        reply_markup=main_menu_keyboard(True, username=message.from_user.username),
     )
 
 
@@ -802,6 +825,218 @@ async def cmd_kb_clear(message: Message):
     await message.answer("🗑 База знаний очищена.")
 
 
+# --- Админ-панель: список клиентов, внутренний чат админов, управление админами ---
+
+ADMIN_CLIENTS_PAGE_SIZE = 10
+
+
+def admin_panel_keyboard(username: str | None) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:0")],
+        [InlineKeyboardButton(text="💬 Общий чат админов", callback_data="admin_chat_broadcast")],
+        [InlineKeyboardButton(text="✉️ Написать админу лично", callback_data="admin_chat_dm_pick")],
+    ]
+    if is_owner(username):
+        buttons.append([InlineKeyboardButton(text="⚙️ Управление админами", callback_data="admin_manage")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def format_client_line(row: "sqlite3.Row") -> str:
+    username = row["username"]
+    label = f"@{username}" if username else f"id{row['user_id']}"
+    if is_admin(username):
+        status = "👑 Админ"
+    elif db.has_active_subscription(row):
+        status = f"💎 Подписка до {row['subscription_until'][:10]}"
+    elif db.has_active_trial(row):
+        status = f"🎉 Триал до {row['trial_until'][:10]}"
+    else:
+        status = f"🆓 Free ({row['requests_today']}/{FREE_REQUESTS_PER_DAY} сегодня)"
+    return f"{label} — {status}"
+
+
+async def get_all_admin_user_ids(exclude_user_id: int | None = None) -> list[tuple[int, str]]:
+    """Возвращает (user_id, username) для всех текущих админов, которые уже запускали бота."""
+    admin_usernames = set(ADMIN_USERNAMES) | set(db.list_db_admins())
+    result = []
+    for uname in admin_usernames:
+        uid = db.get_user_id_by_username(uname)
+        if uid and uid != exclude_user_id:
+            result.append((uid, uname))
+    return result
+
+
+@dp.message(F.text == BTN_ADMIN)
+async def show_admin_panel(message: Message):
+    if not is_admin(message.from_user.username):
+        return
+    await message.answer("🛠 Админ-панель", reply_markup=admin_panel_keyboard(message.from_user.username))
+
+
+@dp.callback_query(F.data == "admin_panel_back")
+async def admin_panel_back(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    try:
+        await callback.message.edit_text("🛠 Админ-панель", reply_markup=admin_panel_keyboard(callback.from_user.username))
+    except Exception:
+        await callback.message.answer("🛠 Админ-панель", reply_markup=admin_panel_keyboard(callback.from_user.username))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "noop")
+async def noop_callback(callback):
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_clients:"))
+async def admin_clients_page(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    page = int(callback.data.split(":")[1])
+    total = db.count_all_users()
+    total_pages = max(1, (total + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    rows = db.get_all_users(limit=ADMIN_CLIENTS_PAGE_SIZE, offset=page * ADMIN_CLIENTS_PAGE_SIZE)
+
+    lines = [format_client_line(r) for r in rows]
+    text = f"👥 Клиенты ({total} всего), стр. {page + 1}/{total_pages}:\n\n" + "\n".join(lines)
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin_clients:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin_clients:{page + 1}"))
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[nav, [InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")]]
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_chat_broadcast")
+async def admin_chat_broadcast_start(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    awaiting_admin_broadcast.add(callback.from_user.id)
+    await callback.message.answer("💬 Напиши сообщение — оно уйдёт всем остальным администраторам.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_chat_dm_pick")
+async def admin_chat_dm_pick(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    admins = await get_all_admin_user_ids(exclude_user_id=callback.from_user.id)
+    if not admins:
+        await callback.message.answer("Других администраторов пока нет в базе (они ещё не запускали бота).")
+        await callback.answer()
+        return
+    buttons = [
+        [InlineKeyboardButton(text=f"@{uname}", callback_data=f"admin_chat_dm_to:{uid}")]
+        for uid, uname in admins
+    ]
+    buttons.append([InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")])
+    await callback.message.answer("Кому написать?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_chat_dm_to:"))
+async def admin_chat_dm_to(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    target_id = int(callback.data.split(":")[1])
+    awaiting_admin_dm[callback.from_user.id] = target_id
+    await callback.message.answer("✉️ Напиши сообщение — оно уйдёт этому администратору лично.")
+    await callback.answer()
+
+
+async def _render_admin_manage(callback):
+    db_admins = db.list_db_admins()
+    lines = ["👑 Базовые (из конфига): " + ", ".join(f"@{u}" for u in ADMIN_USERNAMES)]
+    buttons = []
+    if db_admins:
+        lines.append("\n➕ Добавленные вручную:")
+        for u in db_admins:
+            lines.append(f"• @{u}")
+            buttons.append([InlineKeyboardButton(text=f"❌ Убрать @{u}", callback_data=f"admin_manage_remove:{u}")])
+    else:
+        lines.append("\nДополнительных админов пока нет.")
+    buttons.append([InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_manage_add")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")])
+    text = "\n".join(lines)
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data == "admin_manage")
+async def admin_manage(callback):
+    if not is_owner(callback.from_user.username):
+        await callback.answer("Только владелец может управлять админами", show_alert=True)
+        return
+    await _render_admin_manage(callback)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_manage_add")
+async def admin_manage_add(callback):
+    if not is_owner(callback.from_user.username):
+        await callback.answer("Только владелец может управлять админами", show_alert=True)
+        return
+    awaiting_admin_add.add(callback.from_user.id)
+    await callback.message.answer("Пришли юзернейм нового админа (без @).")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_manage_remove:"))
+async def admin_manage_remove(callback):
+    if not is_owner(callback.from_user.username):
+        await callback.answer("Только владелец может управлять админами", show_alert=True)
+        return
+    username = callback.data.split(":", 1)[1]
+    db.remove_admin(username)
+    await _render_admin_manage(callback)
+    await callback.answer(f"@{username} удалён")
+
+
+async def broadcast_to_admins(message: Message):
+    sender = f"@{message.from_user.username}" if message.from_user.username else f"id{message.from_user.id}"
+    admins = await get_all_admin_user_ids(exclude_user_id=message.from_user.id)
+    if not admins:
+        await message.answer("В общем чате пока нет других администраторов (они ещё не запускали бота).")
+        return
+    sent = 0
+    for uid, _ in admins:
+        try:
+            await bot.send_message(uid, f"💬 [Общий чат] {sender}:\n{message.text}")
+            sent += 1
+        except Exception:
+            pass
+    await message.answer(f"✅ Сообщение отправлено {sent} администратор(ам) в общем чате.")
+
+
+async def send_admin_dm(message: Message, target_id: int):
+    sender = f"@{message.from_user.username}" if message.from_user.username else f"id{message.from_user.id}"
+    try:
+        await bot.send_message(target_id, f"✉️ [Личное] {sender}:\n{message.text}")
+        await message.answer("✅ Сообщение отправлено.")
+    except Exception:
+        await message.answer("⚠️ Не удалось доставить — возможно, этот админ ещё не запускал бота.")
+
+
 # --- Документы (PDF): вопрос по файлу или пополнение базы знаний админом ---
 
 @dp.message(F.document)
@@ -953,6 +1188,94 @@ async def handle_voice(message: Message):
     await process_user_query(message, text.strip())
 
 
+# --- Видео в кружок (Telegram video note) ---
+
+@dp.message(F.text == BTN_VIDEO_CIRCLE)
+async def prompt_video_circle(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Превращение видео в кружок доступно только по подписке.\n"
+            "Оформи подписку, чтобы делать видео-кружки из любых роликов:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    await message.answer(
+        f"⭕ Пришли видео (до {VIDEO_NOTE_MAX_DURATION_SECONDS} секунд, до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ) — "
+        "и я сразу сделаю из него кружок."
+    )
+
+
+@dp.message(F.video)
+async def handle_video_to_circle(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Превращение видео в кружок доступно только по подписке.\n"
+            "Оформи подписку, чтобы делать видео-кружки из любых роликов:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    admin = is_admin(message.from_user.username)
+    if not await check_rate_limit(message, user_id, admin):
+        return
+
+    video = message.video
+    if video.duration and video.duration > VIDEO_NOTE_MAX_DURATION_SECONDS:
+        await message.answer(
+            f"⏱ Видео слишком длинное — максимум {VIDEO_NOTE_MAX_DURATION_SECONDS} секунд для кружка."
+        )
+        return
+    if video.file_size and video.file_size > VIDEO_NOTE_MAX_FILE_SIZE_MB * 1024 * 1024:
+        await message.answer(f"📦 Видео слишком большое — максимум {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ.")
+        return
+
+    status_msg = await message.answer("🔄 Делаю кружок, подожди немного...")
+    await bot.send_chat_action(message.chat.id, "upload_video_note")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = os.path.join(tmp_dir, "input.mp4")
+            output_path = os.path.join(tmp_dir, "circle.mp4")
+
+            file = await bot.get_file(video.file_id)
+            await bot.download_file(file.file_path, destination=input_path)
+
+            size = VIDEO_NOTE_SIZE_PX
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-t", str(VIDEO_NOTE_MAX_DURATION_SECONDS),
+                "-vf", f"crop='min(iw,ih)':'min(iw,ih)',scale={size}:{size}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            if proc.returncode != 0 or not os.path.exists(output_path):
+                raise RuntimeError(stderr.decode(errors="ignore")[-500:])
+
+            await bot.send_video_note(message.chat.id, FSInputFile(output_path))
+    except Exception as e:
+        logging.error(f"Video-to-circle error: {e}")
+        await status_msg.edit_text(random.choice(FALLBACK_APOLOGIES))
+        return
+
+    await status_msg.delete()
+
+
 # --- Основная обработка текстовых запросов к ИИ (используется текстом и голосом) ---
 
 async def process_user_query(message: Message, query_text: str):
@@ -1064,6 +1387,31 @@ async def process_user_query(message: Message, query_text: str):
 async def handle_text(message: Message):
     user_id = message.from_user.id
     db.get_or_create_user(user_id, message.from_user.username)
+
+    if user_id in awaiting_admin_broadcast:
+        awaiting_admin_broadcast.discard(user_id)
+        if is_admin(message.from_user.username):
+            await broadcast_to_admins(message)
+        return
+
+    if user_id in awaiting_admin_dm:
+        target_id = awaiting_admin_dm.pop(user_id)
+        if is_admin(message.from_user.username):
+            await send_admin_dm(message, target_id)
+        return
+
+    if user_id in awaiting_admin_add:
+        awaiting_admin_add.discard(user_id)
+        if is_owner(message.from_user.username):
+            new_username = message.text.strip().lstrip("@")
+            if not new_username or " " in new_username:
+                await message.answer("Некорректный юзернейм. Пришли ещё раз, без @ и пробелов.")
+            elif new_username in ADMIN_USERNAMES or db.is_db_admin(new_username):
+                await message.answer(f"@{new_username} уже администратор.")
+            else:
+                db.add_admin(new_username, added_by=message.from_user.username)
+                await message.answer(f"✅ @{new_username} добавлен в администраторы.")
+        return
 
     if user_id in awaiting_image_prompt:
         awaiting_image_prompt.discard(user_id)
