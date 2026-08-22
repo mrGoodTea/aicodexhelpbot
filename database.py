@@ -1,5 +1,6 @@
 import sqlite3
 import re
+import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, date
 
@@ -19,6 +20,10 @@ from config import (
     RAG_TOP_K,
     RAG_MAX_CHUNKS_TOTAL,
 )
+
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 
 @contextmanager
