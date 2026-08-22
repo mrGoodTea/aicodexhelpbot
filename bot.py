@@ -1262,8 +1262,9 @@ async def prompt_video_circle(message: Message):
         return
 
     await message.answer(
-        f"⭕ Пришли видео (до {VIDEO_NOTE_MAX_DURATION_SECONDS} секунд, до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ) — "
-        "и я сразу сделаю из него кружок."
+        f"⭕ Пришли видео любой длины (я сам обрежу до {VIDEO_NOTE_MAX_DURATION_SECONDS} сек) — "
+        f"вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов) — "
+        "и я сделаю из него кружок."
     )
 
 
@@ -1285,13 +1286,14 @@ async def handle_video_to_circle(message: Message):
         return
 
     video = message.video
-    if video.duration and video.duration > VIDEO_NOTE_MAX_DURATION_SECONDS:
-        await message.answer(
-            f"⏱ Видео слишком длинное — максимум {VIDEO_NOTE_MAX_DURATION_SECONDS} секунд для кружка."
-        )
-        return
+    # Длительность не ограничиваем — ffmpeg ниже сам обрежет до VIDEO_NOTE_MAX_DURATION_SECONDS.
+    # Размер ограничен жёстко: Telegram Bot API не даёт обычным ботам скачивать файлы тяжелее 20 МБ.
     if video.file_size and video.file_size > VIDEO_NOTE_MAX_FILE_SIZE_MB * 1024 * 1024:
-        await message.answer(f"📦 Видео слишком большое — максимум {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ.")
+        await message.answer(
+            f"📦 Видео весит больше {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ — это предел самого Telegram "
+            "для ботов, а не моя настройка. Сожми видео (например, отправь его в более низком "
+            "качестве) и пришли ещё раз."
+        )
         return
 
     status_msg = await message.answer("🔄 Делаю кружок, подожди немного...")
