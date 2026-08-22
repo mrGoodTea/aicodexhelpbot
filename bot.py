@@ -829,10 +829,18 @@ async def cmd_kb_clear(message: Message):
 
 ADMIN_CLIENTS_PAGE_SIZE = 10
 
+CLIENT_FILTERS = {
+    "all": "Все",
+    "sub": "💎 Подписка",
+    "trial": "🎉 Триал",
+    "free": "🆓 Free",
+    "admin": "👑 Админы",
+}
+
 
 def admin_panel_keyboard(username: str | None) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:0")],
+        [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:all:0")],
         [InlineKeyboardButton(text="💬 Общий чат админов", callback_data="admin_chat_broadcast")],
         [InlineKeyboardButton(text="✉️ Написать админу лично", callback_data="admin_chat_dm_pick")],
     ]
@@ -841,18 +849,58 @@ def admin_panel_keyboard(username: str | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def categorize_client(row: "sqlite3.Row") -> str:
+    if is_admin(row["username"]):
+        return "admin"
+    if db.has_active_subscription(row):
+        return "sub"
+    if db.has_active_trial(row):
+        return "trial"
+    return "free"
+
+
 def format_client_line(row: "sqlite3.Row") -> str:
     username = row["username"]
     label = f"@{username}" if username else f"id{row['user_id']}"
-    if is_admin(username):
+    cat = categorize_client(row)
+    if cat == "admin":
         status = "👑 Админ"
-    elif db.has_active_subscription(row):
+    elif cat == "sub":
         status = f"💎 Подписка до {row['subscription_until'][:10]}"
-    elif db.has_active_trial(row):
+    elif cat == "trial":
         status = f"🎉 Триал до {row['trial_until'][:10]}"
     else:
         status = f"🆓 Free ({row['requests_today']}/{FREE_REQUESTS_PER_DAY} сегодня)"
     return f"{label} — {status}"
+
+
+def clients_filter_keyboard(current_filter: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    def label(key: str, text: str) -> str:
+        return f"• {text} •" if key == current_filter else text
+
+    rows = [
+        [
+            InlineKeyboardButton(text=label("all", "Все"), callback_data="admin_clients:all:0"),
+            InlineKeyboardButton(text=label("sub", "💎 Подписка"), callback_data="admin_clients:sub:0"),
+        ],
+        [
+            InlineKeyboardButton(text=label("trial", "🎉 Триал"), callback_data="admin_clients:trial:0"),
+            InlineKeyboardButton(text=label("free", "🆓 Free"), callback_data="admin_clients:free:0"),
+        ],
+        [InlineKeyboardButton(text=label("admin", "👑 Админы"), callback_data="admin_clients:admin:0")],
+    ]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin_clients:{current_filter}:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin_clients:{current_filter}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def get_all_admin_user_ids(exclude_user_id: int | None = None) -> list[tuple[int, str]]:
@@ -896,25 +944,35 @@ async def admin_clients_page(callback):
         await callback.answer("Недоступно", show_alert=True)
         return
 
-    page = int(callback.data.split(":")[1])
-    total = db.count_all_users()
+    _, filter_key, page_str = callback.data.split(":")
+    page = int(page_str)
+    if filter_key not in CLIENT_FILTERS:
+        filter_key = "all"
+
+    all_rows = db.get_all_users(limit=5000, offset=0)
+    counts = {"all": len(all_rows), "sub": 0, "trial": 0, "free": 0, "admin": 0}
+    categorized = []
+    for r in all_rows:
+        cat = categorize_client(r)
+        counts[cat] += 1
+        categorized.append((cat, r))
+
+    filtered = [r for cat, r in categorized if filter_key == "all" or cat == filter_key]
+
+    total = len(filtered)
     total_pages = max(1, (total + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
-    rows = db.get_all_users(limit=ADMIN_CLIENTS_PAGE_SIZE, offset=page * ADMIN_CLIENTS_PAGE_SIZE)
+    page_rows = filtered[page * ADMIN_CLIENTS_PAGE_SIZE: (page + 1) * ADMIN_CLIENTS_PAGE_SIZE]
 
-    lines = [format_client_line(r) for r in rows]
-    text = f"👥 Клиенты ({total} всего), стр. {page + 1}/{total_pages}:\n\n" + "\n".join(lines)
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin_clients:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin_clients:{page + 1}"))
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[nav, [InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")]]
+    lines = [format_client_line(r) for r in page_rows] if page_rows else ["Никого нет в этой категории."]
+    header = (
+        f"👥 Клиенты — {CLIENT_FILTERS[filter_key]} ({total})\n"
+        f"Всего: {counts['all']} · 💎 {counts['sub']} · 🎉 {counts['trial']} · "
+        f"🆓 {counts['free']} · 👑 {counts['admin']}\n\n"
     )
+    text = header + "\n".join(lines) + f"\n\nСтр. {page + 1}/{total_pages}"
+
+    kb = clients_filter_keyboard(filter_key, page, total_pages)
     try:
         await callback.message.edit_text(text, reply_markup=kb)
     except Exception:
