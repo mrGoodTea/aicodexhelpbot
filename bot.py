@@ -1248,6 +1248,9 @@ async def handle_voice(message: Message):
 
 # --- Видео в кружок (Telegram video note) ---
 
+pending_video_circle: dict[int, dict] = {}  # user_id -> {file_id, duration, chat_id}
+
+
 @dp.message(F.text == BTN_VIDEO_CIRCLE)
 async def prompt_video_circle(message: Message):
     user_id = message.from_user.id
@@ -1262,14 +1265,27 @@ async def prompt_video_circle(message: Message):
         return
 
     await message.answer(
-        f"⭕ Пришли видео любой длины (я сам обрежу до {VIDEO_NOTE_MAX_DURATION_SECONDS} сек) — "
-        f"вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов) — "
-        "и я сделаю из него кружок."
+        "⭕ Пришли видео или GIF — сделаю из него кружок.\n\n"
+        f"📌 Важные моменты:\n"
+        f"• Длиннее {VIDEO_NOTE_MAX_DURATION_SECONDS} сек? — спрошу, обрезать ли\n"
+        "• Спрошу, оставить звук или убрать\n"
+        "• Любое соотношение сторон — обрежу по центру до квадрата\n"
+        f"• Вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов)"
     )
 
 
-@dp.message(F.video)
-async def handle_video_to_circle(message: Message):
+def audio_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔊 Со звуком", callback_data="circle_audio_keep"),
+        InlineKeyboardButton(text="🔇 Без звука", callback_data="circle_audio_mute"),
+    ]])
+
+
+async def ask_audio_choice(message: Message):
+    await message.answer("🎵 Оставить звук в кружке или сделать без звука?", reply_markup=audio_choice_keyboard())
+
+
+async def _accept_video_input(message: Message, file_id: str, duration: int | None, file_size: int | None):
     user_id = message.from_user.id
     db.get_or_create_user(user_id, message.from_user.username)
 
@@ -1285,26 +1301,85 @@ async def handle_video_to_circle(message: Message):
     if not await check_rate_limit(message, user_id, admin):
         return
 
-    video = message.video
-    # Длительность не ограничиваем — ffmpeg ниже сам обрежет до VIDEO_NOTE_MAX_DURATION_SECONDS.
     # Размер ограничен жёстко: Telegram Bot API не даёт обычным ботам скачивать файлы тяжелее 20 МБ.
-    if video.file_size and video.file_size > VIDEO_NOTE_MAX_FILE_SIZE_MB * 1024 * 1024:
+    if file_size and file_size > VIDEO_NOTE_MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.answer(
-            f"📦 Видео весит больше {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ — это предел самого Telegram "
+            f"📦 Файл весит больше {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ — это предел самого Telegram "
             "для ботов, а не моя настройка. Сожми видео (например, отправь его в более низком "
             "качестве) и пришли ещё раз."
         )
         return
 
-    status_msg = await message.answer("🔄 Делаю кружок, подожди немного...")
-    await bot.send_chat_action(message.chat.id, "upload_video_note")
+    pending_video_circle[user_id] = {"file_id": file_id, "chat_id": message.chat.id}
+
+    if duration and duration > VIDEO_NOTE_MAX_DURATION_SECONDS:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"✂️ Обрезать до {VIDEO_NOTE_MAX_DURATION_SECONDS} сек", callback_data="circle_trim_yes"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="circle_trim_no"),
+        ]])
+        await message.answer(
+            f"⏱ Видео длиннее {VIDEO_NOTE_MAX_DURATION_SECONDS} секунд (макс. для кружка). "
+            "Обрезать по началу?",
+            reply_markup=kb,
+        )
+        return
+
+    await ask_audio_choice(message)
+
+
+@dp.message(F.video)
+async def handle_video_to_circle(message: Message):
+    video = message.video
+    await _accept_video_input(message, video.file_id, video.duration, video.file_size)
+
+
+@dp.message(F.animation)
+async def handle_gif_to_circle(message: Message):
+    gif = message.animation
+    await _accept_video_input(message, gif.file_id, gif.duration, gif.file_size)
+
+
+@dp.callback_query(F.data == "circle_trim_no")
+async def circle_trim_no(callback):
+    pending_video_circle.pop(callback.from_user.id, None)
+    await callback.message.edit_text("Окей, отменил. Пришли другое видео, если понадобится.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "circle_trim_yes")
+async def circle_trim_yes(callback):
+    if callback.from_user.id not in pending_video_circle:
+        await callback.answer("Сессия истекла, пришли видео заново.", show_alert=True)
+        return
+    await callback.message.edit_text(f"✂️ Хорошо, обрежу до {VIDEO_NOTE_MAX_DURATION_SECONDS} сек.")
+    await ask_audio_choice(callback.message)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.in_(["circle_audio_keep", "circle_audio_mute"]))
+async def circle_audio_choice(callback):
+    user_id = callback.from_user.id
+    pending = pending_video_circle.get(user_id)
+    if not pending:
+        await callback.answer("Сессия истекла, пришли видео заново.", show_alert=True)
+        return
+
+    keep_audio = callback.data == "circle_audio_keep"
+    await callback.answer()
+    try:
+        await callback.message.edit_text("🔄 Делаю кружок, подожди немного...")
+        status_msg = callback.message
+    except Exception:
+        status_msg = await callback.message.answer("🔄 Делаю кружок, подожди немного...")
+
+    await bot.send_chat_action(pending["chat_id"], "upload_video_note")
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             input_path = os.path.join(tmp_dir, "input.mp4")
             output_path = os.path.join(tmp_dir, "circle.mp4")
 
-            file = await bot.get_file(video.file_id)
+            file = await bot.get_file(pending["file_id"])
             await bot.download_file(file.file_path, destination=input_path)
 
             size = VIDEO_NOTE_SIZE_PX
@@ -1313,10 +1388,13 @@ async def handle_video_to_circle(message: Message):
                 "-t", str(VIDEO_NOTE_MAX_DURATION_SECONDS),
                 "-vf", f"crop='min(iw,ih)':'min(iw,ih)',scale={size}:{size}",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart",
-                output_path,
             ]
+            if keep_audio:
+                cmd += ["-c:a", "aac", "-b:a", "128k"]
+            else:
+                cmd += ["-an"]
+            cmd += ["-movflags", "+faststart", output_path]
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -1327,13 +1405,18 @@ async def handle_video_to_circle(message: Message):
             if proc.returncode != 0 or not os.path.exists(output_path):
                 raise RuntimeError(stderr.decode(errors="ignore")[-500:])
 
-            await bot.send_video_note(message.chat.id, FSInputFile(output_path))
+            await bot.send_video_note(pending["chat_id"], FSInputFile(output_path))
     except Exception as e:
         logging.error(f"Video-to-circle error: {e}")
         await status_msg.edit_text(random.choice(FALLBACK_APOLOGIES))
         return
+    finally:
+        pending_video_circle.pop(user_id, None)
 
-    await status_msg.delete()
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
 
 # --- Основная обработка текстовых запросов к ИИ (используется текстом и голосом) ---
