@@ -64,7 +64,8 @@ def init_db():
                 discount_percent INTEGER DEFAULT 0,
                 discount_expires_at TEXT,
                 referral_sub_bonus_given INTEGER DEFAULT 0,
-                trial_until TEXT
+                trial_until TEXT,
+                voice_mode INTEGER DEFAULT 0
             )
         """)
         # миграция для баз, созданных до появления новых колонок
@@ -81,6 +82,7 @@ def init_db():
             ("discount_expires_at", "TEXT"),
             ("referral_sub_bonus_given", "INTEGER DEFAULT 0"),
             ("trial_until", "TEXT"),
+            ("voice_mode", "INTEGER DEFAULT 0"),
         ]:
             _add_column_if_missing(conn, "users", col, coltype)
 
@@ -634,3 +636,20 @@ def get_user_id_by_username(username: str) -> int | None:
             (username,),
         ).fetchone()
         return row["user_id"] if row else None
+
+
+# --- Голосовой AI: переключатель ответа голосом ---
+
+def get_voice_mode(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT voice_mode FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(row and row["voice_mode"])
+
+
+def toggle_voice_mode(user_id: int) -> bool:
+    """Переключает режим и возвращает новое состояние (True = включён)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT voice_mode FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        new_state = 0 if (row and row["voice_mode"]) else 1
+        conn.execute("UPDATE users SET voice_mode = ? WHERE user_id = ?", (new_state, user_id))
+        return bool(new_state)

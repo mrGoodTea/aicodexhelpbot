@@ -117,6 +117,11 @@ VIDEO_NOTE_MAX_DURATION_SECONDS = int(os.getenv("VIDEO_NOTE_MAX_DURATION_SECONDS
 VIDEO_NOTE_MAX_FILE_SIZE_MB = int(os.getenv("VIDEO_NOTE_MAX_FILE_SIZE_MB", "20"))
 VIDEO_NOTE_SIZE_PX = int(os.getenv("VIDEO_NOTE_SIZE_PX", "480"))
 
+# --- Голосовой AI (озвучка ответов через edge-tts, бесплатно) ---
+VOICE_AI_VOICE = os.getenv("VOICE_AI_VOICE", "ru-RU-DmitryNeural")
+VOICE_AI_MAX_SECONDS = int(os.getenv("VOICE_AI_MAX_SECONDS", "60"))
+VOICE_AI_MAX_CHARS = int(os.getenv("VOICE_AI_MAX_CHARS", "2000"))  # предохранитель перед синтезом
+
 # --- Дружелюбные извинения вместо технических ошибок ---
 FALLBACK_APOLOGIES = [
     "🙈 Что-то пошло не так с моей стороны. Попробуй, пожалуйста, ещё раз через минуту.",

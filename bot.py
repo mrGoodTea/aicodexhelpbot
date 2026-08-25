@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import aiohttp
+import edge_tts
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
@@ -56,6 +57,9 @@ from config import (
     VIDEO_NOTE_MAX_DURATION_SECONDS,
     VIDEO_NOTE_MAX_FILE_SIZE_MB,
     VIDEO_NOTE_SIZE_PX,
+    VOICE_AI_VOICE,
+    VOICE_AI_MAX_SECONDS,
+    VOICE_AI_MAX_CHARS,
     FALLBACK_APOLOGIES,
 )
 import database as db
@@ -98,6 +102,7 @@ BTN_MODE = "🎨 Режим"
 BTN_IMAGE = "🖼 Картинка"
 BTN_SEARCH = "🌐 Веб-поиск"
 BTN_VIDEO_CIRCLE = "⭕ Видео-кружок"
+BTN_VOICE_AI = "🔊 Голосовой AI"
 BTN_GOLDEN = "🌟 Золотой запрос"
 BTN_ADMIN = "🛠 Админ-панель"
 
@@ -130,7 +135,7 @@ def main_menu_keyboard(full_access: bool, golden_available: bool = False, userna
             [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_MODE)],
             [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_INVITE)],
             [KeyboardButton(text=BTN_IMAGE), KeyboardButton(text=BTN_SEARCH)],
-            [KeyboardButton(text=BTN_VIDEO_CIRCLE)],
+            [KeyboardButton(text=BTN_VIDEO_CIRCLE), KeyboardButton(text=BTN_VOICE_AI)],
             [KeyboardButton(text=BTN_HELP)],
         ]
     else:
@@ -379,7 +384,7 @@ async def cmd_help(message: Message):
 
     text += "Кнопки внизу:\n" f"{BTN_STATUS} — лимит и статус подписки\n" f"{BTN_BUY} — купить подписку\n" f"{BTN_INVITE} — пригласить друга\n"
     if full_access:
-        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n"
+        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n{BTN_VOICE_AI} — включить/выключить ответы голосом\n"
     if golden_available:
         text += f"{BTN_GOLDEN} — раз в {GOLDEN_QUERY_INTERVAL_DAYS} дней попробовать бота как подписчик\n"
 
@@ -1419,6 +1424,71 @@ async def circle_audio_choice(callback):
         pass
 
 
+# --- Голосовой AI: переключатель и синтез речи (edge-tts, бесплатно) ---
+
+@dp.message(F.text == BTN_VOICE_AI)
+async def toggle_voice_ai(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Голосовой AI доступен только по подписке.\n"
+            "Оформи подписку, чтобы я отвечал тебе голосом:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    enabled = db.toggle_voice_mode(user_id)
+    if enabled:
+        await message.answer(
+            f"🔊 Голосовой AI включён! Теперь отвечаю голосовыми сообщениями "
+            f"(до {VOICE_AI_MAX_SECONDS} секунд). Нажми кнопку ещё раз, чтобы вернуться к тексту."
+        )
+    else:
+        await message.answer("💬 Голосовой AI выключен — снова отвечаю текстом.")
+
+
+async def send_voice_reply(message: Message, text: str):
+    """Озвучивает ответ через edge-tts, обрезает до VOICE_AI_MAX_SECONDS и отправляет голосовым сообщением.
+    При любой ошибке синтеза/конвертации — тихо откатывается на обычный текстовый ответ."""
+    clean_text = text.strip()
+    if not clean_text:
+        return
+
+    tts_text = clean_text[:VOICE_AI_MAX_CHARS]
+
+    try:
+        await bot.send_chat_action(message.chat.id, "record_voice")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mp3_path = os.path.join(tmp_dir, "speech.mp3")
+            ogg_path = os.path.join(tmp_dir, "speech.ogg")
+
+            communicate = edge_tts.Communicate(tts_text, voice=VOICE_AI_VOICE)
+            await communicate.save(mp3_path)
+
+            cmd = [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-t", str(VOICE_AI_MAX_SECONDS),
+                "-c:a", "libopus", "-b:a", "48k", "-ar", "48000", "-ac", "1",
+                ogg_path,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+
+            if proc.returncode != 0 or not os.path.exists(ogg_path):
+                raise RuntimeError(stderr.decode(errors="ignore")[-500:])
+
+            await bot.send_voice(message.chat.id, FSInputFile(ogg_path))
+    except Exception as e:
+        logging.error(f"Voice AI (TTS) error: {e}")
+        await message.answer(text)
+
+
 # --- Основная обработка текстовых запросов к ИИ (используется текстом и голосом) ---
 
 async def process_user_query(message: Message, query_text: str):
@@ -1523,7 +1593,10 @@ async def process_user_query(message: Message, query_text: str):
 
         await message.answer(answer + footer, reply_markup=buy_keyboard())
     else:
-        await message.answer(answer)
+        if db.get_voice_mode(user_id):
+            await send_voice_reply(message, answer)
+        else:
+            await message.answer(answer)
 
 
 @dp.message(F.text)
