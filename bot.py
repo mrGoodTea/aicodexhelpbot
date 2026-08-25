@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import random
 import tempfile
 from datetime import datetime, timedelta
@@ -1449,10 +1450,29 @@ async def toggle_voice_ai(message: Message):
         await message.answer("💬 Голосовой AI выключен — снова отвечаю текстом.")
 
 
+def strip_markdown_for_tts(text: str) -> str:
+    """Убирает Markdown-разметку и служебные символы, чтобы TTS не озвучивал их вслух."""
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)      # блоки кода
+    text = re.sub(r"`([^`]+)`", r"\1", text)                      # `код`
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)                # **жирный**
+    text = re.sub(r"__([^_]+)__", r"\1", text)                    # __жирный__
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)                    # *курсив*
+    text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)         # _курсив_
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)   # # заголовки
+    text = re.sub(r"^\s{0,3}[-*+]\s+", "", text, flags=re.MULTILINE)    # - список
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)          # [текст](ссылка)
+    text = re.sub(r"[#*_`~>]", "", text)                          # прочие символы разметки
+    text = re.sub(r"\n{2,}", ". ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 async def send_voice_reply(message: Message, text: str):
-    """Озвучивает ответ через edge-tts, обрезает до VOICE_AI_MAX_SECONDS и отправляет голосовым сообщением.
+    """Озвучивает ответ через edge-tts и отправляет голосовым сообщением.
+    Обрезка до VOICE_AI_MAX_SECONDS — только предохранитель: сам текст уже
+    запрошен у модели достаточно коротким, чтобы уложиться в лимит без потери смысла.
     При любой ошибке синтеза/конвертации — тихо откатывается на обычный текстовый ответ."""
-    clean_text = text.strip()
+    clean_text = strip_markdown_for_tts(text)
     if not clean_text:
         return
 
@@ -1548,6 +1568,14 @@ async def process_user_query(message: Message, query_text: str):
     mode_key = db.get_user_mode(user_id) if is_sub_like else "default"
     history = user_history.get(user_id, [])
 
+    voice_enabled = is_sub_like and db.get_voice_mode(user_id)
+    voice_instruction = (
+        "\n\nВАЖНО: сейчас включён голосовой режим ответа. Ответь кратко и живым разговорным "
+        "языком — уложись примерно в 110–140 слов (это около 60 секунд речи), не жертвуя смыслом. "
+        "Не используй Markdown, звёздочки, решётки, подчёркивания, списки с дефисами или другие "
+        "символы форматирования — только обычный текст, как для устной речи."
+    )
+
     if mode_key == "kb":
         chunks = db.search_kb(query_text)
         if not chunks:
@@ -1558,9 +1586,13 @@ async def process_user_query(message: Message, query_text: str):
         else:
             context = "\n\n---\n\n".join(chunks)
             system_prompt = RAG_SYSTEM_PROMPT_TEMPLATE.format(context=context)
+            if voice_enabled:
+                system_prompt += voice_instruction
             answer = await ask_ai(query_text, history, system_prompt=system_prompt)
     else:
         system_prompt = MODES.get(mode_key, MODES["default"])["prompt"]
+        if voice_enabled:
+            system_prompt += voice_instruction
         answer = await ask_ai(query_text, history, system_prompt=system_prompt)
 
     history.append({"role": "user", "content": query_text})
