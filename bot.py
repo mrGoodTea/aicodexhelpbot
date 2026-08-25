@@ -1351,10 +1351,6 @@ async def handle_voice(message: Message):
         )
         return
 
-    admin = is_admin(message.from_user.username)
-    if not await check_rate_limit(message, user_id, admin):
-        return
-
     voice = message.voice or message.audio
     if voice.duration and voice.duration > VOICE_MAX_DURATION_SECONDS:
         await message.answer(f"Голосовое слишком длинное (максимум {VOICE_MAX_DURATION_SECONDS} сек).")
