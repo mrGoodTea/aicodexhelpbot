@@ -30,6 +30,7 @@ from config import (
     SUBSCRIPTION_PRICE_STARS,
     SUBSCRIPTION_DAYS,
     TRIAL_DAYS,
+    TRIAL_GRANT_MAX_DAYS,
     FREE_REQUESTS_PER_DAY,
     SHORT_HISTORY_MESSAGES,
     LONG_HISTORY_MESSAGES,
@@ -84,6 +85,7 @@ awaiting_kb_document: set[int] = set()            # админ ждём PDF дл
 awaiting_admin_broadcast: set[int] = set()        # админ пишет сообщение в общий чат админов
 awaiting_admin_dm: dict[int, int] = {}            # админ пишет личное сообщение конкретному админу (sender_id -> target_id)
 awaiting_admin_add: set[int] = set()              # владелец вводит юзернейм нового админа
+awaiting_admin_trial_target: set[int] = set()     # админ вводит юзернейм для выдачи/отзыва триала
 
 image_last_request_at: dict[int, datetime] = {}  # защита от слишком частых запросов картинок
 IMAGE_COOLDOWN_SECONDS = 16  # анонимный доступ Pollinations ограничен ~1 запросом/15 сек
@@ -847,6 +849,7 @@ CLIENT_FILTERS = {
 def admin_panel_keyboard(username: str | None) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:all:0")],
+        [InlineKeyboardButton(text="🎯 Управление триалом", callback_data="admin_trial_start")],
         [InlineKeyboardButton(text="💬 Общий чат админов", callback_data="admin_chat_broadcast")],
         [InlineKeyboardButton(text="✉️ Написать админу лично", callback_data="admin_chat_dm_pick")],
     ]
@@ -983,6 +986,131 @@ async def admin_clients_page(callback):
         await callback.message.edit_text(text, reply_markup=kb)
     except Exception:
         await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+
+# --- Управление триалом: выдать/продлить или забрать (на free) ---
+
+TRIAL_GRANT_OPTIONS = [1, 2, 3, 7, 14, 30]
+
+
+def format_trial_target_status(row: "sqlite3.Row") -> str:
+    if db.has_active_subscription(row):
+        return f"💎 Активная подписка до {row['subscription_until'][:16].replace('T', ' ')}"
+    if db.has_active_trial(row):
+        return f"🎉 Триал активен до {row['trial_until'][:16].replace('T', ' ')}"
+    return "🆓 Free"
+
+
+def trial_actions_keyboard(target_id: int, blocked: bool) -> InlineKeyboardMarkup:
+    if blocked:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")]]
+        )
+    grant_row1 = [
+        InlineKeyboardButton(text=f"+{d} дн.", callback_data=f"admin_trial_grant:{target_id}:{d}")
+        for d in TRIAL_GRANT_OPTIONS[:3]
+    ]
+    grant_row2 = [
+        InlineKeyboardButton(text=f"+{d} дн.", callback_data=f"admin_trial_grant:{target_id}:{d}")
+        for d in TRIAL_GRANT_OPTIONS[3:]
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            grant_row1,
+            grant_row2,
+            [InlineKeyboardButton(text="❌ Забрать триал (на Free)", callback_data=f"admin_trial_revoke:{target_id}")],
+            [InlineKeyboardButton(text="⬅️ В панель", callback_data="admin_panel_back")],
+        ]
+    )
+
+
+@dp.callback_query(F.data == "admin_trial_start")
+async def admin_trial_start(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    awaiting_admin_trial_target.add(callback.from_user.id)
+    await callback.message.answer(
+        "🎯 Пришли юзернейм пользователя (без @), которому нужно выдать/продлить или забрать триал."
+    )
+    await callback.answer()
+
+
+async def start_trial_management(message: Message):
+    target_username = message.text.strip().lstrip("@")
+    target_id = db.get_user_id_by_username(target_username)
+    if not target_id:
+        await message.answer(
+            f"Не нашёл @{target_username} — он ещё не запускал бота, либо юзернейм введён неверно."
+        )
+        return
+
+    row = db.get_user_row(target_id)
+    status = format_trial_target_status(row)
+    blocked = db.has_active_subscription(row)
+
+    text = f"👤 @{target_username}\nСтатус: {status}"
+    if blocked:
+        text += "\n\n🔒 У пользователя оплаченная подписка — управлять триалом нельзя, она в любом случае в приоритете."
+    else:
+        text += f"\n\nВыбери, на сколько выдать триал (максимум {TRIAL_GRANT_MAX_DAYS} дней от текущего момента), либо забери его совсем:"
+
+    await message.answer(text, reply_markup=trial_actions_keyboard(target_id, blocked))
+
+
+@dp.callback_query(F.data.startswith("admin_trial_grant:"))
+async def admin_trial_grant(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    _, target_id_str, days_str = callback.data.split(":")
+    target_id = int(target_id_str)
+    days = int(days_str)
+
+    success, result = db.grant_trial(target_id, days)
+    if not success:
+        if result == "has_subscription":
+            await callback.answer("У пользователя оплаченная подписка — нельзя.", show_alert=True)
+        else:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    until_str = result[:16].replace("T", " ")
+    await callback.message.edit_text(
+        f"✅ Триал выдан/продлён до {until_str} (id{target_id})."
+    )
+    try:
+        await bot.send_message(
+            target_id,
+            f"🎉 Администратор продлил тебе пробный период до {until_str} — пользуйся всеми функциями бота!",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_trial_revoke:"))
+async def admin_trial_revoke(callback):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[1])
+    success, reason = db.revoke_trial(target_id)
+    if not success:
+        if reason == "has_subscription":
+            await callback.answer("У пользователя оплаченная подписка — нельзя.", show_alert=True)
+        else:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    await callback.message.edit_text(f"✅ Триал у id{target_id} снят — пользователь переведён на Free.")
+    try:
+        await bot.send_message(target_id, "ℹ️ Твой пробный период завершён администратором. Действует бесплатный тариф.")
+    except Exception:
+        pass
     await callback.answer()
 
 
@@ -1659,6 +1787,12 @@ async def handle_text(message: Message):
             else:
                 db.add_admin(new_username, added_by=message.from_user.username)
                 await message.answer(f"✅ @{new_username} добавлен в администраторы.")
+        return
+
+    if user_id in awaiting_admin_trial_target:
+        awaiting_admin_trial_target.discard(user_id)
+        if is_admin(message.from_user.username):
+            await start_trial_management(message)
         return
 
     if user_id in awaiting_image_prompt:

@@ -9,6 +9,7 @@ from config import (
     FREE_REQUESTS_PER_DAY,
     SUBSCRIPTION_DAYS,
     TRIAL_DAYS,
+    TRIAL_GRANT_MAX_DAYS,
     STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     STREAK_DISCOUNT_PERCENT,
@@ -184,6 +185,54 @@ def is_full_access(user_id: int) -> bool:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return bool(row and has_full_access(row))
+
+
+def get_user_row(user_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+
+def grant_trial(user_id: int, days: int) -> tuple[bool, str]:
+    """Выдаёт/продлевает пробный период пользователю на `days` дней.
+
+    Нельзя выдать триал платящему подписчику (возвращает 'has_subscription').
+    Остаток триала от текущего момента не может превышать TRIAL_GRANT_MAX_DAYS —
+    если уже есть активный триал, дни добавляются к нему, но итог обрезается по потолку.
+    Возвращает (success, new_trial_until_iso | причина отказа).
+    """
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return False, "user_not_found"
+        if has_active_subscription(row):
+            return False, "has_subscription"
+
+        now = datetime.now()
+        current_trial = datetime.fromisoformat(row["trial_until"]) if row["trial_until"] else None
+        base = current_trial if (current_trial and current_trial > now) else now
+
+        new_until = base + timedelta(days=days)
+        cap = now + timedelta(days=TRIAL_GRANT_MAX_DAYS)
+        if new_until > cap:
+            new_until = cap
+
+        conn.execute(
+            "UPDATE users SET trial_until = ? WHERE user_id = ?",
+            (new_until.isoformat(), user_id),
+        )
+        return True, new_until.isoformat()
+
+
+def revoke_trial(user_id: int) -> tuple[bool, str]:
+    """Убирает пробный период у пользователя (переводит на free). Не действует на подписчиков."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return False, "user_not_found"
+        if has_active_subscription(row):
+            return False, "has_subscription"
+        conn.execute("UPDATE users SET trial_until = NULL WHERE user_id = ?", (user_id,))
+        return True, ""
 
 
 def can_make_request(user_id: int) -> tuple[bool, str]:
