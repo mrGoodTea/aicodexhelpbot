@@ -62,6 +62,8 @@ from config import (
     VOICE_AI_VOICE,
     VOICE_AI_MAX_SECONDS,
     VOICE_AI_MAX_CHARS,
+    VOICE_PERSONAS,
+    VOICE_PERSONA_DEFAULT,
     FALLBACK_APOLOGIES,
 )
 import database as db
@@ -1551,8 +1553,24 @@ async def circle_audio_choice(callback):
 
 # --- Голосовой AI: переключатель и синтез речи (edge-tts, бесплатно) ---
 
+def voice_ai_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current_persona = db.get_voice_persona(user_id)
+    enabled = db.get_voice_mode(user_id)
+
+    persona_buttons = []
+    for key, info in VOICE_PERSONAS.items():
+        label = f"✅ {info['label']}" if (enabled and key == current_persona) else info["label"]
+        persona_buttons.append([InlineKeyboardButton(text=label, callback_data=f"voice_persona:{key}")])
+
+    buttons = persona_buttons
+    if enabled:
+        buttons.append([InlineKeyboardButton(text="🔇 Выключить Голосовой AI", callback_data="voice_ai_off")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.message(F.text == BTN_VOICE_AI)
-async def toggle_voice_ai(message: Message):
+async def show_voice_ai_menu(message: Message):
     user_id = message.from_user.id
     db.get_or_create_user(user_id, message.from_user.username)
 
@@ -1564,14 +1582,59 @@ async def toggle_voice_ai(message: Message):
         )
         return
 
-    enabled = db.toggle_voice_mode(user_id)
+    enabled = db.get_voice_mode(user_id)
     if enabled:
-        await message.answer(
-            f"🔊 Голосовой AI включён! Теперь отвечаю голосовыми сообщениями "
-            f"(до {VOICE_AI_MAX_SECONDS} секунд). Нажми кнопку ещё раз, чтобы вернуться к тексту."
-        )
+        persona = VOICE_PERSONAS.get(db.get_voice_persona(user_id), VOICE_PERSONAS[VOICE_PERSONA_DEFAULT])
+        status = f"🔊 Сейчас включён: {persona['label']}"
     else:
-        await message.answer("💬 Голосовой AI выключен — снова отвечаю текстом.")
+        status = "💬 Сейчас отвечаю текстом."
+
+    await message.answer(
+        f"{status}\n\nВыбери манеру общения для голосовых ответов "
+        f"(до {VOICE_AI_MAX_SECONDS} секунд):",
+        reply_markup=voice_ai_menu_keyboard(user_id),
+    )
+
+
+@dp.callback_query(F.data.startswith("voice_persona:"))
+async def set_voice_persona_callback(callback):
+    user_id = callback.from_user.id
+    if not user_has_full_access(user_id, callback.from_user.username):
+        await callback.answer("Доступно только по подписке.", show_alert=True)
+        return
+
+    persona_key = callback.data.split(":", 1)[1]
+    if persona_key not in VOICE_PERSONAS:
+        await callback.answer("Неизвестная манера общения.", show_alert=True)
+        return
+
+    db.set_voice_persona(user_id, persona_key)
+    if not db.get_voice_mode(user_id):
+        db.toggle_voice_mode(user_id)  # включаем голосовой режим, если он был выключен
+
+    persona = VOICE_PERSONAS[persona_key]
+    text = (
+        f"🔊 Голосовой AI включён: {persona['label']}\n{persona['description']}\n\n"
+        f"Отвечаю голосовыми сообщениями (до {VOICE_AI_MAX_SECONDS} секунд)."
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=voice_ai_menu_keyboard(user_id))
+    except Exception:
+        await callback.message.answer(text, reply_markup=voice_ai_menu_keyboard(user_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "voice_ai_off")
+async def voice_ai_off_callback(callback):
+    user_id = callback.from_user.id
+    if db.get_voice_mode(user_id):
+        db.toggle_voice_mode(user_id)
+    text = "💬 Голосовой AI выключен — снова отвечаю текстом."
+    try:
+        await callback.message.edit_text(text, reply_markup=voice_ai_menu_keyboard(user_id))
+    except Exception:
+        await callback.message.answer(text, reply_markup=voice_ai_menu_keyboard(user_id))
+    await callback.answer()
 
 
 def strip_markdown_for_tts(text: str) -> str:
@@ -1699,6 +1762,11 @@ async def process_user_query(message: Message, query_text: str):
         "Не используй Markdown, звёздочки, решётки, подчёркивания, списки с дефисами или другие "
         "символы форматирования — только обычный текст, как для устной речи."
     )
+    if voice_enabled:
+        persona_key = db.get_voice_persona(user_id)
+        persona_prompt = VOICE_PERSONAS.get(persona_key, VOICE_PERSONAS[VOICE_PERSONA_DEFAULT])["prompt"]
+        if persona_prompt:
+            voice_instruction += persona_prompt
 
     if mode_key == "kb":
         chunks = db.search_kb(query_text)

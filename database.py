@@ -10,6 +10,7 @@ from config import (
     SUBSCRIPTION_DAYS,
     TRIAL_DAYS,
     TRIAL_GRANT_MAX_DAYS,
+    VOICE_PERSONA_DEFAULT,
     STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     STREAK_DISCOUNT_PERCENT,
@@ -66,7 +67,8 @@ def init_db():
                 discount_expires_at TEXT,
                 referral_sub_bonus_given INTEGER DEFAULT 0,
                 trial_until TEXT,
-                voice_mode INTEGER DEFAULT 0
+                voice_mode INTEGER DEFAULT 0,
+                voice_persona TEXT DEFAULT 'friendly'
             )
         """)
         # миграция для баз, созданных до появления новых колонок
@@ -84,6 +86,7 @@ def init_db():
             ("referral_sub_bonus_given", "INTEGER DEFAULT 0"),
             ("trial_until", "TEXT"),
             ("voice_mode", "INTEGER DEFAULT 0"),
+            ("voice_persona", "TEXT DEFAULT 'friendly'"),
         ]:
             _add_column_if_missing(conn, "users", col, coltype)
 
@@ -702,3 +705,14 @@ def toggle_voice_mode(user_id: int) -> bool:
         new_state = 0 if (row and row["voice_mode"]) else 1
         conn.execute("UPDATE users SET voice_mode = ? WHERE user_id = ?", (new_state, user_id))
         return bool(new_state)
+
+
+def get_voice_persona(user_id: int) -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT voice_persona FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return (row["voice_persona"] if row and row["voice_persona"] else VOICE_PERSONA_DEFAULT)
+
+
+def set_voice_persona(user_id: int, persona_key: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET voice_persona = ? WHERE user_id = ?", (persona_key, user_id))
