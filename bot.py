@@ -64,10 +64,13 @@ from config import (
     VOICE_AI_MAX_CHARS,
     VOICE_PERSONAS,
     VOICE_PERSONA_DEFAULT,
+    AI_PROVIDERS,
+    AI_PROVIDER_DEFAULT,
     FALLBACK_APOLOGIES,
 )
 import database as db
 from groq_client import ask_ai, ask_with_web_search, analyze_image, transcribe_voice
+from deepseek_client import ask_deepseek
 
 logging.basicConfig(level=logging.INFO)
 
@@ -108,6 +111,7 @@ BTN_IMAGE = "🖼 Картинка"
 BTN_SEARCH = "🌐 Веб-поиск"
 BTN_VIDEO_CIRCLE = "⭕ Видео-кружок"
 BTN_VOICE_AI = "🔊 Голосовой AI"
+BTN_AI_PROVIDER = "🤖 ИИ-модель"
 BTN_GOLDEN = "🌟 Золотой запрос"
 BTN_ADMIN = "🛠 Админ-панель"
 
@@ -141,6 +145,7 @@ def main_menu_keyboard(full_access: bool, golden_available: bool = False, userna
             [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_INVITE)],
             [KeyboardButton(text=BTN_IMAGE), KeyboardButton(text=BTN_SEARCH)],
             [KeyboardButton(text=BTN_VIDEO_CIRCLE), KeyboardButton(text=BTN_VOICE_AI)],
+            [KeyboardButton(text=BTN_AI_PROVIDER)],
             [KeyboardButton(text=BTN_HELP)],
         ]
     else:
@@ -389,7 +394,7 @@ async def cmd_help(message: Message):
 
     text += "Кнопки внизу:\n" f"{BTN_STATUS} — лимит и статус подписки\n" f"{BTN_BUY} — купить подписку\n" f"{BTN_INVITE} — пригласить друга\n"
     if full_access:
-        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n{BTN_VOICE_AI} — включить/выключить ответы голосом\n"
+        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n{BTN_VOICE_AI} — включить/выключить ответы голосом\n{BTN_AI_PROVIDER} — выбрать ИИ-модель (Groq / DeepSeek)\n"
     if golden_available:
         text += f"{BTN_GOLDEN} — раз в {GOLDEN_QUERY_INTERVAL_DAYS} дней попробовать бота как подписчик\n"
 
@@ -1637,6 +1642,75 @@ async def voice_ai_off_callback(callback):
     await callback.answer()
 
 
+# --- Переключатель ИИ-модели (Groq / DeepSeek) — только по подписке ---
+
+def ai_provider_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current = db.get_ai_provider(user_id)
+    buttons = [
+        [InlineKeyboardButton(
+            text=(f"✅ {info['label']}" if key == current else info["label"]),
+            callback_data=f"ai_provider:{key}",
+        )]
+        for key, info in AI_PROVIDERS.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(F.text == BTN_AI_PROVIDER)
+async def show_ai_provider_menu(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Выбор ИИ-модели доступен только по подписке.\n"
+            "Оформи подписку, чтобы переключаться между моделями:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
+    options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
+
+    await message.answer(
+        f"Текущая модель: {current['label']}\n\n{options_text}\n\nВыбери модель кнопкой ниже:",
+        reply_markup=ai_provider_keyboard(user_id),
+    )
+
+
+@dp.callback_query(F.data.startswith("ai_provider:"))
+async def set_ai_provider_callback(callback):
+    user_id = callback.from_user.id
+    if not user_has_full_access(user_id, callback.from_user.username):
+        await callback.answer("Доступно только по подписке.", show_alert=True)
+        return
+
+    provider_key = callback.data.split(":", 1)[1]
+    if provider_key not in AI_PROVIDERS:
+        await callback.answer("Неизвестная модель.", show_alert=True)
+        return
+
+    db.set_ai_provider(user_id, provider_key)
+    await callback.answer(f"Модель изменена: {AI_PROVIDERS[provider_key]['label']}")
+    text = f"✅ Установлена модель: {AI_PROVIDERS[provider_key]['label']}"
+    try:
+        await callback.message.edit_text(text, reply_markup=ai_provider_keyboard(user_id))
+    except Exception:
+        await callback.message.answer(text, reply_markup=ai_provider_keyboard(user_id))
+
+
+async def call_ai(query_text: str, history: list[dict] | None, system_prompt: str, user_id: int, is_sub_like: bool) -> str:
+    """Выбирает ИИ-провайдера. Переключение доступно только full-access пользователям —
+    для бесплатных всегда используется Groq. При ошибке DeepSeek — тихий откат на Groq."""
+    provider = db.get_ai_provider(user_id) if is_sub_like else AI_PROVIDER_DEFAULT
+    if is_sub_like and provider == "deepseek":
+        try:
+            return await ask_deepseek(query_text, history, system_prompt=system_prompt)
+        except Exception as e:
+            logging.error(f"DeepSeek error, falling back to Groq: {e}")
+    return await ask_ai(query_text, history, system_prompt=system_prompt)
+
+
 def strip_markdown_for_tts(text: str) -> str:
     """Убирает Markdown-разметку и служебные символы, чтобы TTS не озвучивал их вслух."""
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)      # блоки кода
@@ -1780,12 +1854,12 @@ async def process_user_query(message: Message, query_text: str):
             system_prompt = RAG_SYSTEM_PROMPT_TEMPLATE.format(context=context)
             if voice_enabled:
                 system_prompt += voice_instruction
-            answer = await ask_ai(query_text, history, system_prompt=system_prompt)
+            answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
     else:
         system_prompt = MODES.get(mode_key, MODES["default"])["prompt"]
         if voice_enabled:
             system_prompt += voice_instruction
-        answer = await ask_ai(query_text, history, system_prompt=system_prompt)
+        answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
 
     history.append({"role": "user", "content": query_text})
     history.append({"role": "assistant", "content": answer})

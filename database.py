@@ -11,6 +11,7 @@ from config import (
     TRIAL_DAYS,
     TRIAL_GRANT_MAX_DAYS,
     VOICE_PERSONA_DEFAULT,
+    AI_PROVIDER_DEFAULT,
     STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     STREAK_DISCOUNT_PERCENT,
@@ -68,7 +69,8 @@ def init_db():
                 referral_sub_bonus_given INTEGER DEFAULT 0,
                 trial_until TEXT,
                 voice_mode INTEGER DEFAULT 0,
-                voice_persona TEXT DEFAULT 'friendly'
+                voice_persona TEXT DEFAULT 'friendly',
+                ai_provider TEXT DEFAULT 'groq'
             )
         """)
         # миграция для баз, созданных до появления новых колонок
@@ -87,6 +89,7 @@ def init_db():
             ("trial_until", "TEXT"),
             ("voice_mode", "INTEGER DEFAULT 0"),
             ("voice_persona", "TEXT DEFAULT 'friendly'"),
+            ("ai_provider", "TEXT DEFAULT 'groq'"),
         ]:
             _add_column_if_missing(conn, "users", col, coltype)
 
@@ -716,3 +719,14 @@ def get_voice_persona(user_id: int) -> str:
 def set_voice_persona(user_id: int, persona_key: str):
     with get_conn() as conn:
         conn.execute("UPDATE users SET voice_persona = ? WHERE user_id = ?", (persona_key, user_id))
+
+
+def get_ai_provider(user_id: int) -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT ai_provider FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return (row["ai_provider"] if row and row["ai_provider"] else AI_PROVIDER_DEFAULT)
+
+
+def set_ai_provider(user_id: int, provider_key: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET ai_provider = ? WHERE user_id = ?", (provider_key, user_id))

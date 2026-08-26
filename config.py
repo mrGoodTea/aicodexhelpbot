@@ -12,6 +12,25 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
+# --- DeepSeek (альтернативный ИИ-провайдер, OpenAI-совместимый API) ---
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+# Старые имена deepseek-chat/deepseek-reasoner сняты с поддержки 24.07.2026 — используем актуальные.
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+# --- Переключатель ИИ-модели (доступен только по подписке) ---
+AI_PROVIDER_DEFAULT = "groq"
+AI_PROVIDERS = {
+    "groq": {
+        "label": "⚡ Groq",
+        "description": "Модель по умолчанию — быстрые ответы.",
+    },
+    "deepseek": {
+        "label": "🐳 DeepSeek",
+        "description": "Альтернативная модель — другой стиль и качество ответов.",
+    },
+}
+
 # --- Модели для мультимодальных функций ---
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")            # анализ изображений
 GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")    # распознавание голоса
