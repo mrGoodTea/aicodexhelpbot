@@ -106,6 +106,18 @@ REFERRAL_SUBSCRIPTION_BONUS_REQUESTS = int(os.getenv("REFERRAL_SUBSCRIPTION_BONU
 # --- Генерация изображений (бесплатный публичный сервис Pollinations, без API-ключа) ---
 IMAGE_GEN_BASE_URL = "https://image.pollinations.ai/prompt/"
 
+# --- Поиск музыки (доступно только по подписке) ---
+# Поиск по названию — Deezer API, бесплатно и без ключа, настройки не требует.
+# Поиск по словам из песни — Genius API: нужен бесплатный токен с https://genius.com/api-clients
+# (Genius → New API Client → Client Access Token). Пока токен не задан, эта под-функция
+# отвечает пользователю, что временно недоступна — распознавание по аудио и поиск по
+# названию при этом работают в любом случае.
+GENIUS_ACCESS_TOKEN = os.getenv("GENIUS_ACCESS_TOKEN", "")
+# Сколько секунд аудио/видео вырезаем перед отправкой в Shazam (10-20 сек достаточно)
+SHAZAM_CLIP_SECONDS = int(os.getenv("SHAZAM_CLIP_SECONDS", "20"))
+# Сколько вариантов показывать в результатах поиска музыки
+MUSIC_RESULTS_LIMIT = int(os.getenv("MUSIC_RESULTS_LIMIT", "5"))
+
 # --- Rate limiting и анти-спам ---
 TEXT_COOLDOWN_SECONDS = float(os.getenv("TEXT_COOLDOWN_SECONDS", "2"))     # мин. пауза между запросами к ИИ
 SPAM_WINDOW_SECONDS = int(os.getenv("SPAM_WINDOW_SECONDS", "10"))          # окно для подсчёта частоты

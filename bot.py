@@ -67,10 +67,13 @@ from config import (
     AI_PROVIDERS,
     AI_PROVIDER_DEFAULT,
     FALLBACK_APOLOGIES,
+    SHAZAM_CLIP_SECONDS,
+    MUSIC_RESULTS_LIMIT,
 )
 import database as db
 from groq_client import ask_ai, ask_with_web_search, analyze_image, transcribe_voice
 from deepseek_client import ask_deepseek
+from music_client import search_track_by_name, search_by_lyrics, recognize_audio
 
 logging.basicConfig(level=logging.INFO)
 
@@ -91,6 +94,9 @@ awaiting_admin_broadcast: set[int] = set()        # админ пишет соо
 awaiting_admin_dm: dict[int, int] = {}            # админ пишет личное сообщение конкретному админу (sender_id -> target_id)
 awaiting_admin_add: set[int] = set()              # владелец вводит юзернейм нового админа
 awaiting_admin_trial_target: set[int] = set()     # админ вводит юзернейм для выдачи/отзыва триала
+awaiting_music_track: set[int] = set()            # ждём название трека для поиска
+awaiting_music_lyrics: set[int] = set()           # ждём фрагмент текста песни для поиска
+awaiting_music_shazam: set[int] = set()           # ждём аудио/видео для распознавания (Shazam)
 
 image_last_request_at: dict[int, datetime] = {}  # защита от слишком частых запросов картинок
 IMAGE_COOLDOWN_SECONDS = 16  # анонимный доступ Pollinations ограничен ~1 запросом/15 сек
@@ -112,6 +118,7 @@ BTN_SEARCH = "🌐 Веб-поиск"
 BTN_VIDEO_CIRCLE = "⭕ Видео-кружок"
 BTN_VOICE_AI = "🔊 Голосовой AI"
 BTN_AI_PROVIDER = "🤖 ИИ-модель"
+BTN_MUSIC = "🎵 Поиск музыки"
 BTN_GOLDEN = "🌟 Золотой запрос"
 BTN_ADMIN = "🛠 Админ-панель"
 
@@ -145,6 +152,7 @@ def main_menu_keyboard(full_access: bool, golden_available: bool = False, userna
             [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_INVITE)],
             [KeyboardButton(text=BTN_IMAGE), KeyboardButton(text=BTN_SEARCH)],
             [KeyboardButton(text=BTN_VIDEO_CIRCLE), KeyboardButton(text=BTN_VOICE_AI)],
+            [KeyboardButton(text=BTN_MUSIC)],
             [KeyboardButton(text=BTN_AI_PROVIDER)],
             [KeyboardButton(text=BTN_HELP)],
         ]
@@ -174,6 +182,14 @@ def mode_keyboard() -> InlineKeyboardMarkup:
         for key, info in MODES.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def music_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 По названию трека", callback_data="music_mode_track")],
+        [InlineKeyboardButton(text="📝 По словам из песни", callback_data="music_mode_lyrics")],
+        [InlineKeyboardButton(text="🎧 Шазам (по аудио/видео)", callback_data="music_mode_shazam")],
+    ])
 
 
 def invite_keyboard() -> InlineKeyboardMarkup:
@@ -809,6 +825,170 @@ async def run_web_search(message: Message, query: str):
     await message.answer(f"🌐 {answer}")
 
 
+# --- Поиск музыки (по названию, по словам из песни, распознавание по аудио/видео) ---
+
+@dp.message(Command("music"))
+@dp.message(F.text == BTN_MUSIC)
+async def handle_music_button(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Поиск музыки доступен только по подписке.\n"
+            "Оформи подписку, чтобы искать треки по названию, по словам из песни "
+            "и распознавать музыку по аудио или видео:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    awaiting_music_track.discard(user_id)
+    awaiting_music_lyrics.discard(user_id)
+    awaiting_music_shazam.discard(user_id)
+    await message.answer("🎵 Как будем искать музыку?", reply_markup=music_menu_keyboard())
+
+
+@dp.callback_query(F.data.startswith("music_mode_"))
+async def process_music_mode_callback(callback):
+    user_id = callback.from_user.id
+
+    if not user_has_full_access(user_id, callback.from_user.username):
+        await callback.answer("Доступно только по подписке.", show_alert=True)
+        return
+
+    mode = callback.data.removeprefix("music_mode_")
+    await callback.answer()
+
+    if mode == "track":
+        awaiting_music_track.add(user_id)
+        await callback.message.answer(
+            "🔎 Напиши название трека (можно с исполнителем), например: Imagine Dragons Believer"
+        )
+    elif mode == "lyrics":
+        awaiting_music_lyrics.add(user_id)
+        await callback.message.answer(
+            "📝 Напиши строчку или фрагмент текста песни, которую вспомнил"
+        )
+    elif mode == "shazam":
+        awaiting_music_shazam.add(user_id)
+        await callback.message.answer(
+            "🎧 Пришли голосовое сообщение, аудиофайл или видео с фрагментом песни "
+            "(10–15 секунд обычно достаточно, чем чище звук — тем лучше)."
+        )
+
+
+async def run_music_track_search(message: Message, query: str):
+    user_id = message.from_user.id
+    admin = is_admin(message.from_user.username)
+    if not await check_rate_limit(message, user_id, admin):
+        return
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    results = await search_track_by_name(query)
+
+    if not results:
+        await message.answer("🤷 Ничего не нашёл по этому названию. Попробуй уточнить запрос.")
+        return
+
+    for track in results:
+        caption = f"🎵 {track['title']}\n👤 {track['artist']}"
+        if track.get("url"):
+            caption += f"\n🔗 {track['url']}"
+
+        if track.get("preview"):
+            try:
+                await message.answer_audio(audio=track["preview"], caption=caption)
+                continue
+            except Exception as e:
+                logging.warning(f"Не удалось отправить превью трека: {e}")
+
+        await message.answer(caption)
+
+
+async def run_music_lyrics_search(message: Message, query: str):
+    user_id = message.from_user.id
+    admin = is_admin(message.from_user.username)
+    if not await check_rate_limit(message, user_id, admin):
+        return
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    results = await search_by_lyrics(query)
+
+    if results is None:
+        await message.answer(
+            "⚠️ Поиск по словам из песни пока не настроен администратором бота "
+            "(нужен бесплатный ключ Genius API). Попробуй поиск по названию или Шазам."
+        )
+        return
+
+    if not results:
+        await message.answer("🤷 Ничего не нашёл по этим словам. Попробуй другой фрагмент текста.")
+        return
+
+    lines = ["📝 Вот что нашлось по этим словам:"]
+    for track in results:
+        line = f"🎵 {track['title']} — {track['artist']}"
+        if track.get("url"):
+            line += f"\n🔗 {track['url']}"
+        lines.append(line)
+
+    await message.answer("\n\n".join(lines))
+
+
+async def run_shazam_recognition(message: Message, file_id: str):
+    user_id = message.from_user.id
+    admin = is_admin(message.from_user.username)
+    if not await check_rate_limit(message, user_id, admin):
+        return
+
+    status_msg = await message.answer("🎧 Слушаю и ищу трек, подожди немного...")
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = os.path.join(tmp_dir, "input.media")
+            audio_path = os.path.join(tmp_dir, "audio.mp3")
+
+            file = await bot.get_file(file_id)
+            await bot.download_file(file.file_path, destination=input_path)
+
+            # Достаточно короткого чистого фрагмента: вырезаем начало через ffmpeg
+            # (он уже используется в проекте для видео-кружков) и убираем видеодорожку.
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-t", str(SHAZAM_CLIP_SECONDS),
+                "-vn", "-acodec", "libmp3lame", "-ar", "44100",
+                audio_path,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+
+            if proc.returncode != 0 or not os.path.exists(audio_path):
+                raise RuntimeError(stderr.decode(errors="ignore")[-500:])
+
+            track = await recognize_audio(audio_path)
+    except Exception as e:
+        logging.error(f"Shazam error: {e}")
+        await status_msg.edit_text(random.choice(FALLBACK_APOLOGIES))
+        return
+
+    if not track or not track.get("title"):
+        await status_msg.edit_text(
+            "🤷 Не удалось распознать трек. Попробуй прислать более чистый и громкий фрагмент "
+            "(10–15 секунд, без сильного постороннего шума)."
+        )
+        return
+
+    text = f"🎧 Похоже, это:\n\n🎵 {track['title']}\n👤 {track['artist']}"
+    if track.get("url"):
+        text += f"\n🔗 {track['url']}"
+    await status_msg.edit_text(text)
+
+
 # --- База знаний (RAG), администрирование ---
 
 @dp.message(Command("kb_add"))
@@ -1359,6 +1539,12 @@ async def handle_voice(message: Message):
         return
 
     voice = message.voice or message.audio
+
+    if user_id in awaiting_music_shazam:
+        awaiting_music_shazam.discard(user_id)
+        await run_shazam_recognition(message, voice.file_id)
+        return
+
     if voice.duration and voice.duration > VOICE_MAX_DURATION_SECONDS:
         await message.answer(f"Голосовое слишком длинное (максимум {VOICE_MAX_DURATION_SECONDS} сек).")
         return
@@ -1467,6 +1653,13 @@ async def _accept_video_input(message: Message, file_id: str, duration: int | No
 @dp.message(F.video)
 async def handle_video_to_circle(message: Message):
     video = message.video
+    user_id = message.from_user.id
+
+    if user_id in awaiting_music_shazam:
+        awaiting_music_shazam.discard(user_id)
+        await run_shazam_recognition(message, video.file_id)
+        return
+
     await _accept_video_input(message, video.file_id, video.duration, video.file_size)
 
 
@@ -1941,6 +2134,16 @@ async def handle_text(message: Message):
     if user_id in awaiting_search_query:
         awaiting_search_query.discard(user_id)
         await run_web_search(message, message.text)
+        return
+
+    if user_id in awaiting_music_track:
+        awaiting_music_track.discard(user_id)
+        await run_music_track_search(message, message.text)
+        return
+
+    if user_id in awaiting_music_lyrics:
+        awaiting_music_lyrics.discard(user_id)
+        await run_music_lyrics_search(message, message.text)
         return
 
     await process_user_query(message, message.text)
