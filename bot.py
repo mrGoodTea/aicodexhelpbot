@@ -192,6 +192,22 @@ def music_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def music_links_keyboard(title: str | None, artist: str | None) -> InlineKeyboardMarkup:
+    """
+    Кнопки со ссылками на поиск этого трека в VK и Яндекс.Музыке.
+    Официальных API поиска у этих сервисов нет (VK Audio API закрыт для сторонних
+    приложений), поэтому ведём на их обычные страницы поиска — это всегда работает
+    и не требует ключей.
+    """
+    query = quote(f"{artist or ''} {title or ''}".strip())
+    vk_url = f"https://vk.com/search?c[q]={query}&c[section]=audio"
+    yandex_url = f"https://music.yandex.ru/search?text={query}"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎧 VK Музыка", url=vk_url),
+        InlineKeyboardButton(text="🎧 Яндекс Музыка", url=yandex_url),
+    ]])
+
+
 def invite_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -892,17 +908,16 @@ async def run_music_track_search(message: Message, query: str):
 
     for track in results:
         caption = f"🎵 {track['title']}\n👤 {track['artist']}"
-        if track.get("url"):
-            caption += f"\n🔗 {track['url']}"
+        kb = music_links_keyboard(track.get("title"), track.get("artist"))
 
         if track.get("preview"):
             try:
-                await message.answer_audio(audio=track["preview"], caption=caption)
+                await message.answer_audio(audio=track["preview"], caption=caption, reply_markup=kb)
                 continue
             except Exception as e:
                 logging.warning(f"Не удалось отправить превью трека: {e}")
 
-        await message.answer(caption)
+        await message.answer(caption, reply_markup=kb)
 
 
 async def run_music_lyrics_search(message: Message, query: str):
@@ -925,14 +940,13 @@ async def run_music_lyrics_search(message: Message, query: str):
         await message.answer("🤷 Ничего не нашёл по этим словам. Попробуй другой фрагмент текста.")
         return
 
-    lines = ["📝 Вот что нашлось по этим словам:"]
+    await message.answer("📝 Вот что нашлось по этим словам:")
     for track in results:
-        line = f"🎵 {track['title']} — {track['artist']}"
+        text = f"🎵 {track['title']} — {track['artist']}"
         if track.get("url"):
-            line += f"\n🔗 {track['url']}"
-        lines.append(line)
-
-    await message.answer("\n\n".join(lines))
+            text += f"\n📄 Текст: {track['url']}"
+        kb = music_links_keyboard(track.get("title"), track.get("artist"))
+        await message.answer(text, reply_markup=kb)
 
 
 async def run_shazam_recognition(message: Message, file_id: str):
@@ -984,9 +998,8 @@ async def run_shazam_recognition(message: Message, file_id: str):
         return
 
     text = f"🎧 Похоже, это:\n\n🎵 {track['title']}\n👤 {track['artist']}"
-    if track.get("url"):
-        text += f"\n🔗 {track['url']}"
-    await status_msg.edit_text(text)
+    kb = music_links_keyboard(track.get("title"), track.get("artist"))
+    await status_msg.edit_text(text, reply_markup=kb)
 
 
 # --- База знаний (RAG), администрирование ---
