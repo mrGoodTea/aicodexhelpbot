@@ -73,7 +73,7 @@ from config import (
 import database as db
 from groq_client import ask_ai, ask_with_web_search, analyze_image, transcribe_voice
 from deepseek_client import ask_deepseek
-from music_client import search_track_by_name, search_by_lyrics, recognize_audio
+from music_client import search_track_by_name, search_by_lyrics, recognize_audio, GeniusApiError
 
 logging.basicConfig(level=logging.INFO)
 
@@ -119,6 +119,7 @@ BTN_VIDEO_CIRCLE = "⭕ Видео-кружок"
 BTN_VOICE_AI = "🔊 Голосовой AI"
 BTN_AI_PROVIDER = "🤖 ИИ-модель"
 BTN_MUSIC = "🎵 Поиск музыки"
+BTN_FEATURES = "🧰 Функции"
 BTN_GOLDEN = "🌟 Золотой запрос"
 BTN_ADMIN = "🛠 Админ-панель"
 
@@ -148,13 +149,9 @@ def user_has_full_access(user_id: int, username: str | None) -> bool:
 def main_menu_keyboard(full_access: bool, golden_available: bool = False, username: str | None = None) -> ReplyKeyboardMarkup:
     if full_access:
         keyboard = [
-            [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_MODE)],
-            [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_INVITE)],
-            [KeyboardButton(text=BTN_IMAGE), KeyboardButton(text=BTN_SEARCH)],
-            [KeyboardButton(text=BTN_VIDEO_CIRCLE), KeyboardButton(text=BTN_VOICE_AI)],
-            [KeyboardButton(text=BTN_MUSIC)],
-            [KeyboardButton(text=BTN_AI_PROVIDER)],
-            [KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_BUY)],
+            [KeyboardButton(text=BTN_INVITE), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_FEATURES)],
         ]
     else:
         keyboard = [
@@ -182,6 +179,24 @@ def mode_keyboard() -> InlineKeyboardMarkup:
         for key, info in MODES.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def functions_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=BTN_MODE, callback_data="feat_mode"),
+            InlineKeyboardButton(text=BTN_AI_PROVIDER, callback_data="feat_ai_provider"),
+        ],
+        [
+            InlineKeyboardButton(text=BTN_IMAGE, callback_data="feat_image"),
+            InlineKeyboardButton(text=BTN_SEARCH, callback_data="feat_search"),
+        ],
+        [
+            InlineKeyboardButton(text=BTN_VIDEO_CIRCLE, callback_data="feat_video_circle"),
+            InlineKeyboardButton(text=BTN_VOICE_AI, callback_data="feat_voice_ai"),
+        ],
+        [InlineKeyboardButton(text=BTN_MUSIC, callback_data="feat_music")],
+    ])
 
 
 def music_menu_keyboard() -> InlineKeyboardMarkup:
@@ -426,13 +441,97 @@ async def cmd_help(message: Message):
 
     text += "Кнопки внизу:\n" f"{BTN_STATUS} — лимит и статус подписки\n" f"{BTN_BUY} — купить подписку\n" f"{BTN_INVITE} — пригласить друга\n"
     if full_access:
-        text += f"{BTN_MODE} — выбрать режим ответа\n{BTN_IMAGE} — сгенерировать картинку\n{BTN_SEARCH} — веб-поиск\n{BTN_VIDEO_CIRCLE} — превратить видео в кружок\n{BTN_VOICE_AI} — включить/выключить ответы голосом\n{BTN_AI_PROVIDER} — выбрать ИИ-модель (Groq / DeepSeek)\n"
+        text += (
+            f"{BTN_FEATURES} — режимы ответа, картинки, веб-поиск, видео-кружки, "
+            f"голосовой AI, ИИ-модель и {BTN_MUSIC}\n"
+        )
     if golden_available:
         text += f"{BTN_GOLDEN} — раз в {GOLDEN_QUERY_INTERVAL_DAYS} дней попробовать бота как подписчик\n"
 
     text += f"\n/leaderboard — топ приглашающих друзей\n\nПо любым вопросам — пиши мне: @{CONTACT_USERNAME}"
 
     await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available, message.from_user.username))
+
+
+@dp.message(F.text == BTN_FEATURES)
+async def show_features_menu(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username)
+
+    if not user_has_full_access(user_id, message.from_user.username):
+        await message.answer(
+            "🔒 Эти функции доступны только по подписке.\n"
+            "Оформи подписку, чтобы открыть режимы ответа, картинки, веб-поиск, "
+            "видео-кружки, голосовой AI и поиск музыки:",
+            reply_markup=buy_keyboard(),
+        )
+        return
+
+    await message.answer("🧰 Выбери функцию:", reply_markup=functions_menu_keyboard())
+
+
+@dp.callback_query(F.data.startswith("feat_"))
+async def process_features_callback(callback):
+    user_id = callback.from_user.id
+    username = callback.from_user.username
+    db.get_or_create_user(user_id, username)
+
+    if not user_has_full_access(user_id, username):
+        await callback.answer("Доступно только по подписке.", show_alert=True)
+        return
+
+    action = callback.data.removeprefix("feat_")
+    await callback.answer()
+    target = callback.message
+
+    if action == "mode":
+        current_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
+        modes_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in MODES.values())
+        await target.answer(
+            f"Текущий режим: {current_label}\n\n"
+            f"Доступные режимы:\n\n{modes_text}\n\n"
+            "Выбери новый режим кнопкой ниже:",
+            reply_markup=mode_keyboard(),
+        )
+    elif action == "ai_provider":
+        current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
+        options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
+        await target.answer(
+            f"Текущая модель: {current['label']}\n\n{options_text}\n\nВыбери модель кнопкой ниже:",
+            reply_markup=ai_provider_keyboard(user_id),
+        )
+    elif action == "image":
+        awaiting_image_prompt.add(user_id)
+        await target.answer("🖼 Опиши, что нарисовать, например: кот-космонавт в скафандре")
+    elif action == "search":
+        awaiting_search_query.add(user_id)
+        await target.answer("🌐 Что найти? Например: курс доллара сегодня")
+    elif action == "video_circle":
+        await target.answer(
+            "⭕ Пришли видео или GIF — сделаю из него кружок.\n\n"
+            f"📌 Важные моменты:\n"
+            f"• Длиннее {VIDEO_NOTE_MAX_DURATION_SECONDS} сек? — спрошу, обрезать ли\n"
+            "• Спрошу, оставить звук или убрать\n"
+            "• Любое соотношение сторон — обрежу по центру до квадрата\n"
+            f"• Вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов)"
+        )
+    elif action == "voice_ai":
+        enabled = db.get_voice_mode(user_id)
+        if enabled:
+            persona = VOICE_PERSONAS.get(db.get_voice_persona(user_id), VOICE_PERSONAS[VOICE_PERSONA_DEFAULT])
+            status = f"🔊 Сейчас включён: {persona['label']}"
+        else:
+            status = "💬 Сейчас отвечаю текстом."
+        await target.answer(
+            f"{status}\n\nВыбери манеру общения для голосовых ответов "
+            f"(до {VOICE_AI_MAX_SECONDS} секунд):",
+            reply_markup=voice_ai_menu_keyboard(user_id),
+        )
+    elif action == "music":
+        awaiting_music_track.discard(user_id)
+        awaiting_music_lyrics.discard(user_id)
+        awaiting_music_shazam.discard(user_id)
+        await target.answer("🎵 Как будем искать музыку?", reply_markup=music_menu_keyboard())
 
 
 @dp.message(Command("status"))
@@ -927,7 +1026,18 @@ async def run_music_lyrics_search(message: Message, query: str):
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
-    results = await search_by_lyrics(query)
+
+    try:
+        results = await search_by_lyrics(query)
+    except GeniusApiError as e:
+        logging.error(f"Genius lookup failed: {e}")
+        await message.answer(
+            "⚠️ Не удалось выполнить поиск по словам песни — сервис Genius ответил ошибкой.\n"
+            "Возможно, неверный или просроченный GENIUS_ACCESS_TOKEN в настройках бота "
+            "(проверь его в Genius: genius.com/api-clients → твой клиент → Generate Access Token). "
+            "Подробности ошибки — в логах бота на Railway."
+        )
+        return
 
     if results is None:
         await message.answer(

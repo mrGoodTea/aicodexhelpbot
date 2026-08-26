@@ -9,6 +9,10 @@ DEEZER_SEARCH_URL = "https://api.deezer.com/search"
 GENIUS_SEARCH_URL = "https://api.genius.com/search"
 
 
+class GeniusApiError(Exception):
+    """Реальная ошибка запроса к Genius (не путать с 'просто нет совпадений')."""
+
+
 async def search_track_by_name(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> list[dict]:
     """
     Поиск трека по названию/исполнителю через Deezer API — полностью бесплатно, без ключа.
@@ -42,7 +46,8 @@ async def search_by_lyrics(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> list
     """
     Поиск песни по фрагменту текста через Genius API (нужен бесплатный токен в .env).
     Возвращает None, если GENIUS_ACCESS_TOKEN не настроен — тогда фича считается выключенной.
-    Иначе — список {title, artist, url}.
+    Поднимает GeniusApiError, если токен задан, но запрос реально не удался (неверный токен,
+    сетевая ошибка и т.п.) — это отличается от "просто нет совпадений" (пустой список).
     """
     if not GENIUS_ACCESS_TOKEN:
         return None
@@ -53,12 +58,18 @@ async def search_by_lyrics(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> list
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(GENIUS_SEARCH_URL, params=params) as resp:
+                body_text = await resp.text()
                 if resp.status != 200:
-                    return []
+                    logging.error(
+                        f"Genius API вернул {resp.status} на запрос '{query}': {body_text[:300]}"
+                    )
+                    raise GeniusApiError(f"HTTP {resp.status}")
                 data = await resp.json()
+    except GeniusApiError:
+        raise
     except Exception as e:
         logging.error(f"Genius search error: {e}")
-        return []
+        raise GeniusApiError(str(e))
 
     hits = ((data.get("response") or {}).get("hits") or [])[:limit]
     results = []
