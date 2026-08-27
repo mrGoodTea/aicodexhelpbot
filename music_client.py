@@ -42,6 +42,21 @@ async def search_track_by_name(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> 
     return results
 
 
+async def find_preview_url(title: str, artist: str) -> str | None:
+    """
+    Пытается найти 30-сек. превью для трека через Deezer по названию+исполнителю.
+    Используется, чтобы добавить прослушивание к результатам без своего аудио
+    (например, из поиска по словам через Genius, где превью нет).
+    """
+    query = f"{artist or ''} {title or ''}".strip()
+    if not query:
+        return None
+    results = await search_track_by_name(query, limit=1)
+    if results and results[0].get("preview"):
+        return results[0]["preview"]
+    return None
+
+
 async def search_by_lyrics(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> list[dict] | None:
     """
     Поиск песни по фрагменту текста через Genius API (нужен бесплатный токен в .env).

@@ -73,7 +73,13 @@ from config import (
 import database as db
 from groq_client import ask_ai, ask_with_web_search, analyze_image, transcribe_voice
 from deepseek_client import ask_deepseek
-from music_client import search_track_by_name, search_by_lyrics, recognize_audio, GeniusApiError
+from music_client import (
+    search_track_by_name,
+    search_by_lyrics,
+    recognize_audio,
+    find_preview_url,
+    GeniusApiError,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1052,11 +1058,25 @@ async def run_music_lyrics_search(message: Message, query: str):
 
     await message.answer("📝 Вот что нашлось по этим словам:")
     for track in results:
-        text = f"🎵 {track['title']} — {track['artist']}"
+        caption = f"🎵 {track['title']} — {track['artist']}"
         if track.get("url"):
-            text += f"\n📄 Текст: {track['url']}"
+            caption += f"\n📄 Текст: {track['url']}"
         kb = music_links_keyboard(track.get("title"), track.get("artist"))
-        await message.answer(text, reply_markup=kb)
+
+        preview = None
+        try:
+            preview = await find_preview_url(track.get("title"), track.get("artist"))
+        except Exception as e:
+            logging.warning(f"Не удалось найти превью для '{track.get('title')}': {e}")
+
+        if preview:
+            try:
+                await message.answer_audio(audio=preview, caption=caption, reply_markup=kb)
+                continue
+            except Exception as e:
+                logging.warning(f"Не удалось отправить превью трека: {e}")
+
+        await message.answer(caption, reply_markup=kb)
 
 
 async def run_shazam_recognition(message: Message, file_id: str):
