@@ -553,7 +553,8 @@ async def cmd_status(message: Message):
         mode_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
         await message.answer(
             "👑 Ты администратор — безлимитный доступ навсегда.\n"
-            f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})",
+            f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})\n"
+            f"🆔 Твой ID: {user_id}",
             reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
         )
         return
@@ -565,7 +566,8 @@ async def cmd_status(message: Message):
             f"✅ У тебя активна подписка до {sub_until[:16].replace('T', ' ')}.\n"
             "Запросы без лимита.\n"
             f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})\n"
-            f"🔥 Стрик активности: {streak} дней подряд",
+            f"🔥 Стрик активности: {streak} дней подряд\n"
+            f"🆔 Твой ID: {user_id}",
             reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
         )
         return
@@ -577,7 +579,8 @@ async def cmd_status(message: Message):
             f"🎉 У тебя активен пробный период — полный доступ ещё {format_time_left(trial_until)}.\n"
             "Запросы без лимита, доступны все функции.\n"
             f"Текущий режим ответа: {mode_label} (кнопка {BTN_MODE})\n"
-            f"🔥 Стрик активности: {streak} дней подряд\n\n"
+            f"🔥 Стрик активности: {streak} дней подряд\n"
+            f"🆔 Твой ID: {user_id}\n\n"
             f"После окончания пробного периода — {FREE_REQUESTS_PER_DAY} бесплатных запросов в день, "
             f"либо оформи подписку заранее кнопкой {BTN_BUY}.",
             reply_markup=main_menu_keyboard(full_access, username=message.from_user.username),
@@ -606,6 +609,7 @@ async def cmd_status(message: Message):
         text += f"\n🌟 Тебе доступен золотой запрос — попробуй кнопкой {BTN_GOLDEN}\n"
 
     text += f"\nХочешь без лимита? Нажми {BTN_BUY}"
+    text += f"\n🆔 Твой ID: {user_id}"
     await message.answer(text, reply_markup=main_menu_keyboard(full_access, golden_available, message.from_user.username))
 
 
@@ -1363,25 +1367,40 @@ async def admin_trial_start(callback):
         return
     awaiting_admin_trial_target.add(callback.from_user.id)
     await callback.message.answer(
-        "🎯 Пришли юзернейм пользователя (без @), которому нужно выдать/продлить или забрать триал."
+        "🎯 Пришли юзернейм пользователя (без @) или его числовой Telegram ID "
+        "(надёжнее — не ломается при смене юзернейма; пользователь может посмотреть "
+        f"свой ID в разделе {BTN_STATUS}), которому нужно выдать/продлить или забрать триал."
     )
     await callback.answer()
 
 
 async def start_trial_management(message: Message):
-    target_username = message.text.strip().lstrip("@")
-    target_id = db.get_user_id_by_username(target_username)
+    raw_input = message.text.strip().lstrip("@")
+
+    if raw_input.isdigit():
+        target_id = int(raw_input)
+        target_username = db.get_username(target_id)
+    else:
+        target_username = raw_input
+        target_id = db.get_user_id_by_username(target_username)
+
     if not target_id:
         await message.answer(
-            f"Не нашёл @{target_username} — он ещё не запускал бота, либо юзернейм введён неверно."
+            f"Не нашёл «{raw_input}» — либо этот человек ещё не запускал бота, либо юзернейм/ID "
+            f"введён неверно.\n\nСамый надёжный способ — попроси его прислать свой числовой ID "
+            f"(он виден в разделе {BTN_STATUS}) и введи именно его."
         )
         return
 
     row = db.get_user_row(target_id)
+    if row is None:
+        await message.answer(f"Не нашёл пользователя с ID {target_id} в базе.")
+        return
     status = format_trial_target_status(row)
     blocked = db.has_active_subscription(row)
 
-    text = f"👤 @{target_username}\nСтатус: {status}"
+    display_name = f"@{target_username}" if target_username else f"id{target_id}"
+    text = f"👤 {display_name} (ID: {target_id})\nСтатус: {status}"
     if blocked:
         text += "\n\n🔒 У пользователя оплаченная подписка — управлять триалом нельзя, она в любом случае в приоритете."
     else:

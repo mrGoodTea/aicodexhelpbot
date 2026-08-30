@@ -135,6 +135,14 @@ def get_or_create_user(
             )
             row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
             created = True
+        elif username and row["username"] != username:
+            # Пользователь сменил юзернейм в Telegram — держим базу в актуальном состоянии,
+            # иначе поиск по старому/новому юзернейму (например, для выдачи триала) сломается.
+            conn.execute(
+                "UPDATE users SET username = ? WHERE user_id = ?",
+                (username, user_id),
+            )
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return row, created
 
 
