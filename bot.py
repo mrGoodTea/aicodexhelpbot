@@ -67,6 +67,7 @@ from config import (
     AI_PROVIDERS,
     AI_PROVIDER_DEFAULT,
     AI_PROVIDER_SCOPE_NOTE,
+    JOKE_SYSTEM_PROMPT,
     FALLBACK_APOLOGIES,
     SHAZAM_CLIP_SECONDS,
     MUSIC_RESULTS_LIMIT,
@@ -105,6 +106,8 @@ awaiting_admin_trial_target: set[int] = set()     # админ вводит юз
 awaiting_music_track: set[int] = set()            # ждём название трека для поиска
 awaiting_music_lyrics: set[int] = set()           # ждём фрагмент текста песни для поиска
 awaiting_music_shazam: set[int] = set()           # ждём аудио/видео для распознавания (Shazam)
+
+JOKE_REQUEST_RE = re.compile(r"анекдот|шут[а-яё]*|юмор[а-яё]*", re.IGNORECASE)
 
 image_last_request_at: dict[int, datetime] = {}  # защита от слишком частых запросов картинок
 IMAGE_COOLDOWN_SECONDS = 16  # анонимный доступ Pollinations ограничен ~1 запросом/15 сек
@@ -2234,6 +2237,13 @@ async def process_user_query(message: Message, query_text: str):
             if voice_enabled:
                 system_prompt += voice_instruction
             answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
+    elif JOKE_REQUEST_RE.search(query_text):
+        # Явный запрос анекдота/шутки — используем отдельный "прокачанный" промпт
+        # с примерами, независимо от того, какой режим ответа сейчас выбран.
+        system_prompt = JOKE_SYSTEM_PROMPT
+        if voice_enabled:
+            system_prompt += voice_instruction
+        answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
     else:
         system_prompt = MODES.get(mode_key, MODES["default"])["prompt"]
         if voice_enabled:
