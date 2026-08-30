@@ -66,6 +66,7 @@ from config import (
     VOICE_PERSONA_DEFAULT,
     AI_PROVIDERS,
     AI_PROVIDER_DEFAULT,
+    AI_PROVIDER_SCOPE_NOTE,
     FALLBACK_APOLOGIES,
     SHAZAM_CLIP_SECONDS,
     MUSIC_RESULTS_LIMIT,
@@ -504,7 +505,8 @@ async def process_features_callback(callback):
         current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
         options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
         await target.answer(
-            f"Текущая модель: {current['label']}\n\n{options_text}\n\nВыбери модель кнопкой ниже:",
+            f"Текущая модель: {current['label']}\n\n{options_text}\n\n"
+            f"{AI_PROVIDER_SCOPE_NOTE}\n\nВыбери модель кнопкой ниже:",
             reply_markup=ai_provider_keyboard(user_id),
         )
     elif action == "image":
@@ -953,10 +955,18 @@ async def run_web_search(message: Message, query: str):
     city = extract_weather_city(query)
     if city:
         weather_text = await get_weather_summary(city)
+
+        if not weather_text:
+            # Часто после города идёт уточнение (район/аэропорт/улица), которое сбивает
+            # геокодер — например "пермь лобаново". Пробуем ещё раз только по первому слову.
+            first_word = city.split()[0] if city.split() else None
+            if first_word and first_word != city:
+                weather_text = await get_weather_summary(first_word)
+
         if weather_text:
             await message.answer(weather_text)
             return
-        # город не распознан геокодером — просто пробуем обычным веб-поиском ниже
+        # город так и не распознан геокодером — пробуем обычным веб-поиском ниже
 
     answer = await ask_with_web_search(query)
     await message.answer(f"🌐 {answer}")
@@ -2041,7 +2051,8 @@ async def show_ai_provider_menu(message: Message):
     options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
 
     await message.answer(
-        f"Текущая модель: {current['label']}\n\n{options_text}\n\nВыбери модель кнопкой ниже:",
+        f"Текущая модель: {current['label']}\n\n{options_text}\n\n"
+        f"{AI_PROVIDER_SCOPE_NOTE}\n\nВыбери модель кнопкой ниже:",
         reply_markup=ai_provider_keyboard(user_id),
     )
 
