@@ -60,6 +60,12 @@ async def ask_with_web_search(query: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
+        error_text = str(e)
+        if "request_too_large" in error_text or "Request Entity Too Large" in error_text:
+            return (
+                "⚠️ Найденные по этому запросу страницы оказались слишком объёмными для поиска. "
+                "Попробуй сформулировать вопрос конкретнее (например, добавь название сайта/источника)."
+            )
         return f"⚠️ Не удалось выполнить веб-поиск: {e}\n\nПопробуйте ещё раз чуть позже."
 
 

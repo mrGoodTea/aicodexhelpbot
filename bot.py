@@ -80,6 +80,7 @@ from music_client import (
     find_preview_url,
     GeniusApiError,
 )
+from weather_client import extract_weather_city, get_weather_summary
 
 logging.basicConfig(level=logging.INFO)
 
@@ -946,6 +947,17 @@ async def run_web_search(message: Message, query: str):
     search_last_request_at[user_id] = datetime.now()
 
     await bot.send_chat_action(message.chat.id, "typing")
+
+    # Погоду отдаём напрямую через Open-Meteo (бесплатно, лёгкие ответы) — обычный
+    # веб-поиск через Groq иногда падает с ошибкой 413 на тяжёлых погодных сайтах.
+    city = extract_weather_city(query)
+    if city:
+        weather_text = await get_weather_summary(city)
+        if weather_text:
+            await message.answer(weather_text)
+            return
+        # город не распознан геокодером — просто пробуем обычным веб-поиском ниже
+
     answer = await ask_with_web_search(query)
     await message.answer(f"🌐 {answer}")
 
