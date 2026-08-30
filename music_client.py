@@ -1,4 +1,5 @@
 import logging
+import re
 
 import aiohttp
 from shazamio import Shazam
@@ -42,18 +43,38 @@ async def search_track_by_name(query: str, limit: int = MUSIC_RESULTS_LIMIT) -> 
     return results
 
 
+def _clean_search_text(text: str | None) -> str:
+    """Убирает уточнения в скобках ('(Remastered 2011)' и т.п.) — они часто мешают точному
+    совпадению в поиске Deezer."""
+    if not text:
+        return ""
+    return re.sub(r"[\(\[].*?[\)\]]", "", text).strip()
+
+
 async def find_preview_url(title: str, artist: str) -> str | None:
     """
     Пытается найти 30-сек. превью для трека через Deezer по названию+исполнителю.
     Используется, чтобы добавить прослушивание к результатам без своего аудио
     (например, из поиска по словам через Genius, где превью нет).
+
+    Пробует сначала точный запрос "исполнитель + название", затем, если не нашлось,
+    более широкий — по одному названию. Если трека вовсе нет в каталоге Deezer
+    (частый случай для старых/локальных русских песен), превью не будет — это
+    ограничение каталога, а не ошибка.
     """
-    query = f"{artist or ''} {title or ''}".strip()
-    if not query:
-        return None
-    results = await search_track_by_name(query, limit=1)
-    if results and results[0].get("preview"):
-        return results[0]["preview"]
+    title_clean = _clean_search_text(title)
+    artist_clean = _clean_search_text(artist)
+
+    attempts = []
+    if artist_clean and title_clean:
+        attempts.append(f"{artist_clean} {title_clean}")
+    if title_clean:
+        attempts.append(title_clean)
+
+    for query in attempts:
+        results = await search_track_by_name(query, limit=1)
+        if results and results[0].get("preview"):
+            return results[0]["preview"]
     return None
 
 

@@ -1076,6 +1076,7 @@ async def run_music_lyrics_search(message: Message, query: str):
             except Exception as e:
                 logging.warning(f"Не удалось отправить превью трека: {e}")
 
+        caption += "\n🔇 Превью для этого трека не нашлось (нет в каталоге для прослушивания)"
         await message.answer(caption, reply_markup=kb)
 
 
