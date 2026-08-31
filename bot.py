@@ -472,12 +472,10 @@ async def show_features_menu(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Эти функции доступны только по подписке.\n"
             "Оформи подписку, чтобы открыть режимы ответа, картинки, веб-поиск, "
-            "видео-кружки, голосовой AI и поиск музыки:",
-            reply_markup=buy_keyboard(),
-        )
+            "видео-кружки, голосовой AI и поиск музыки:", buy_keyboard())
         return
 
     await send_menu(message, user_id, "features", "🧰 Выбери функцию:", functions_menu_keyboard())
@@ -497,11 +495,16 @@ async def process_features_callback(callback):
     await callback.answer()
     target = callback.message
 
-    # Переход на любую другую функцию, кроме самой музыки, — явный выход из поиска музыки.
+    # Переход на любую другую функцию — явный выход из всех "липких" режимов,
+    # кроме того, на который сейчас переходим.
     if action != "music":
         awaiting_music_track.discard(user_id)
         awaiting_music_lyrics.discard(user_id)
         awaiting_music_shazam.discard(user_id)
+    if action != "image":
+        awaiting_image_prompt.discard(user_id)
+    if action != "search":
+        awaiting_search_query.discard(user_id)
 
     if action == "mode":
         current_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
@@ -524,10 +527,16 @@ async def process_features_callback(callback):
         )
     elif action == "image":
         awaiting_image_prompt.add(user_id)
-        await target.answer("🖼 Опиши, что нарисовать, например: кот-космонавт в скафандре")
+        await target.answer(
+            "🖼 Опиши, что нарисовать, например: кот-космонавт в скафандре\n"
+            "Можно присылать описания одно за другим — рисую каждое."
+        )
     elif action == "search":
         awaiting_search_query.add(user_id)
-        await target.answer("🌐 Что найти? Например: курс доллара сегодня")
+        await target.answer(
+            "🌐 Что найти? Например: курс доллара сегодня\n"
+            "Можно спрашивать несколько раз подряд."
+        )
     elif action == "video_circle":
         await target.answer(
             "⭕ Пришли видео или GIF — сделаю из него кружок.\n\n"
@@ -645,7 +654,7 @@ async def cmd_buy(message: Message):
     modes_text = "\n\n".join(
         f"{info['label']}\n{info['description']}" for key, info in MODES.items() if key != "default"
     )
-    await message.answer(
+    await send_menu(message, user_id, "buy", 
         f"Подписка на {SUBSCRIPTION_DAYS} дней без ограничения по запросам — {price_line}.\n\n"
         "Что получаешь дополнительно:\n"
         f"• Безлимитные запросы (сейчас {FREE_REQUESTS_PER_DAY} в день)\n"
@@ -654,9 +663,7 @@ async def cmd_buy(message: Message):
         "• Загрузка PDF и база знаний (бот отвечает по твоим документам)\n"
         "• Веб-поиск в реальном времени (новости, цены, погода)\n"
         "• Режимы ответа под разные задачи:\n\n"
-        f"{modes_text}",
-        reply_markup=buy_keyboard(),
-    )
+        f"{modes_text}", buy_keyboard())
 
 
 @dp.message(Command("invite"))
@@ -721,11 +728,9 @@ async def cmd_mode(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Режимы ответа доступны только по подписке.\n"
-            "Оформи подписку, чтобы выбрать стиль общения с ботом:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы выбрать стиль общения с ботом:", buy_keyboard())
         return
 
     current_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
@@ -839,11 +844,9 @@ async def cmd_image(message: Message, command: CommandObject):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Генерация изображений доступна только по подписке.\n"
-            "Оформи подписку и описывай, что нарисовать: /image закат над горами",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку и описывай, что нарисовать: /image закат над горами", buy_keyboard())
         return
 
     prompt = command.args
@@ -861,15 +864,46 @@ async def handle_image_button(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Генерация изображений доступна только по подписке.\n"
-            "Оформи подписку, чтобы рисовать картинки по описанию:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы рисовать картинки по описанию:", buy_keyboard())
         return
 
     awaiting_image_prompt.add(user_id)
     await message.answer("🖼 Опиши, что нарисовать, например: кот-космонавт в скафандре")
+
+
+def exit_mode_keyboard(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Готово", callback_data=callback_data),
+    ]])
+
+
+def with_exit_row(kb: InlineKeyboardMarkup, callback_data: str) -> InlineKeyboardMarkup:
+    rows = list(kb.inline_keyboard) + [[
+        InlineKeyboardButton(text="✅ Готово", callback_data=callback_data),
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "done_image")
+async def process_done_image(callback):
+    awaiting_image_prompt.discard(callback.from_user.id)
+    await callback.answer("Вышел из режима генерации картинок")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data == "done_search")
+async def process_done_search(callback):
+    awaiting_search_query.discard(callback.from_user.id)
+    await callback.answer("Вышел из режима веб-поиска")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 async def generate_and_send_image(message: Message, prompt: str):
@@ -905,8 +939,9 @@ async def generate_and_send_image(message: Message, prompt: str):
         return
 
     photo_file = BufferedInputFile(image_bytes, filename="image.png")
+    kb = exit_mode_keyboard("done_image")
     try:
-        await message.answer_photo(photo=photo_file, caption=f"🎨 {prompt}")
+        await message.answer_photo(photo=photo_file, caption=f"🎨 {prompt}\n\nМожешь прислать ещё описание — рисую дальше.", reply_markup=kb)
     except Exception as e:
         logging.error(f"Failed to send generated image: {e}")
         await message.answer(random.choice(FALLBACK_APOLOGIES))
@@ -920,11 +955,9 @@ async def cmd_search(message: Message, command: CommandObject):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Веб-поиск в реальном времени доступен только по подписке.\n"
-            "Оформи подписку и спрашивай: /search курс доллара сегодня",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку и спрашивай: /search курс доллара сегодня", buy_keyboard())
         return
 
     query = command.args
@@ -942,11 +975,9 @@ async def handle_search_button(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Веб-поиск в реальном времени доступен только по подписке.\n"
-            "Оформи подписку, чтобы получать актуальные новости, цены и погоду:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы получать актуальные новости, цены и погоду:", buy_keyboard())
         return
 
     awaiting_search_query.add(user_id)
@@ -980,12 +1011,12 @@ async def run_web_search(message: Message, query: str):
                 weather_text = await get_weather_summary(first_word)
 
         if weather_text:
-            await message.answer(weather_text)
+            await message.answer(weather_text, reply_markup=exit_mode_keyboard("done_search"))
             return
         # город так и не распознан геокодером — пробуем обычным веб-поиском ниже
 
     answer = await ask_with_web_search(query)
-    await message.answer(f"🌐 {answer}")
+    await message.answer(f"🌐 {answer}", reply_markup=exit_mode_keyboard("done_search"))
 
 
 def exit_music_keyboard() -> InlineKeyboardMarkup:
@@ -1024,12 +1055,10 @@ async def handle_music_button(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Поиск музыки доступен только по подписке.\n"
             "Оформи подписку, чтобы искать треки по названию, по словам из песни "
-            "и распознавать музыку по аудио или видео:",
-            reply_markup=buy_keyboard(),
-        )
+            "и распознавать музыку по аудио или видео:", buy_keyboard())
         return
 
     awaiting_music_track.discard(user_id)
@@ -1731,11 +1760,9 @@ async def handle_document(message: Message):
         return
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Загрузка документов доступна только по подписке.\n"
-            "Оформи подписку, чтобы бот мог отвечать по содержимому файлов:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы бот мог отвечать по содержимому файлов:", buy_keyboard())
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
@@ -1770,11 +1797,9 @@ async def handle_photo(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Анализ изображений доступен только по подписке.\n"
-            "Оформи подписку, чтобы бот мог отвечать по содержимому фото:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы бот мог отвечать по содержимому фото:", buy_keyboard())
         return
 
     admin = is_admin(message.from_user.username)
@@ -1807,11 +1832,9 @@ async def handle_voice(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Распознавание голосовых сообщений доступно только по подписке.\n"
-            "Оформи подписку и просто наговаривай вопросы:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку и просто наговаривай вопросы:", buy_keyboard())
         return
 
     voice = message.voice or message.audio
@@ -1880,11 +1903,9 @@ async def prompt_video_circle(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Превращение видео в кружок доступно только по подписке.\n"
-            "Оформи подписку, чтобы делать видео-кружки из любых роликов:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы делать видео-кружки из любых роликов:", buy_keyboard())
         return
 
     await message.answer(
@@ -1913,11 +1934,9 @@ async def _accept_video_input(message: Message, file_id: str, duration: int | No
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Превращение видео в кружок доступно только по подписке.\n"
-            "Оформи подписку, чтобы делать видео-кружки из любых роликов:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы делать видео-кружки из любых роликов:", buy_keyboard())
         return
 
     admin = is_admin(message.from_user.username)
@@ -2072,11 +2091,9 @@ async def show_voice_ai_menu(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Голосовой AI доступен только по подписке.\n"
-            "Оформи подписку, чтобы я отвечал тебе голосом:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы я отвечал тебе голосом:", buy_keyboard())
         return
 
     enabled = db.get_voice_mode(user_id)
@@ -2155,11 +2172,9 @@ async def show_ai_provider_menu(message: Message):
     db.get_or_create_user(user_id, message.from_user.username)
 
     if not user_has_full_access(user_id, message.from_user.username):
-        await message.answer(
+        await send_menu(message, user_id, "buy", 
             "🔒 Выбор ИИ-модели доступен только по подписке.\n"
-            "Оформи подписку, чтобы переключаться между моделями:",
-            reply_markup=buy_keyboard(),
-        )
+            "Оформи подписку, чтобы переключаться между моделями:", buy_keyboard())
         return
 
     current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
@@ -2289,24 +2304,20 @@ async def process_user_query(message: Message, query_text: str):
         if newly_granted:
             discount, expires_at = db.get_active_discount(user_id)
             price, _ = price_with_discount(user_id)
-            await message.answer(
+            await send_menu(message, user_id, "buy", 
                 f"🔥 Ты активно пользуешься ботом {DYNAMIC_DISCOUNT_ACTIVE_DAYS} дня подряд — держи "
                 f"персональную скидку {discount}% на подписку!\n"
                 f"Всего {price} ⭐ вместо {SUBSCRIPTION_PRICE_STARS} ⭐ — но только ближайшие "
-                f"{format_time_left(expires_at)}.",
-                reply_markup=buy_keyboard(),
-            )
+                f"{format_time_left(expires_at)}.", buy_keyboard())
 
     if not admin and not full_access and not using_golden:
         allowed, reason = db.can_make_request(user_id)
         if not allowed:
             if reason == "limit":
-                await message.answer(
+                await send_menu(message, user_id, "buy", 
                     "🚫 Бесплатные запросы на сегодня закончились.\n"
                     f"Следующий бесплатный запрос через {time_until_midnight()}.\n"
-                    "Оформи подписку — и лимита не будет, либо пригласи друга через /invite:",
-                    reply_markup=buy_keyboard(),
-                )
+                    "Оформи подписку — и лимита не будет, либо пригласи друга через /invite:", buy_keyboard())
             return
 
     await bot.send_chat_action(message.chat.id, "typing")
@@ -2373,10 +2384,8 @@ async def process_user_query(message: Message, query_text: str):
         golden_pending.discard(user_id)
         db.use_golden_query(user_id)
         await message.answer(answer)
-        await message.answer(
-            "🌟 Это был твой золотой запрос — с полной подпиской так будет каждый раз!",
-            reply_markup=buy_keyboard(),
-        )
+        await send_menu(message, user_id, "buy", 
+            "🌟 Это был твой золотой запрос — с полной подпиской так будет каждый раз!", buy_keyboard())
         return
 
     if not admin and not full_access:
@@ -2393,7 +2402,7 @@ async def process_user_query(message: Message, query_text: str):
         if bonus > 0:
             footer += f" 🎁 Бонусных: {bonus}."
 
-        await message.answer(answer + footer, reply_markup=buy_keyboard())
+        await send_menu(message, user_id, "buy", answer + footer, buy_keyboard())
     else:
         if db.get_voice_mode(user_id):
             await send_voice_reply(message, answer)
@@ -2438,12 +2447,10 @@ async def handle_text(message: Message):
         return
 
     if user_id in awaiting_image_prompt:
-        awaiting_image_prompt.discard(user_id)
         await generate_and_send_image(message, message.text)
         return
 
     if user_id in awaiting_search_query:
-        awaiting_search_query.discard(user_id)
         await run_web_search(message, message.text)
         return
 
