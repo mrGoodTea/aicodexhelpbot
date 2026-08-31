@@ -67,7 +67,6 @@ from config import (
     AI_PROVIDERS,
     AI_PROVIDER_DEFAULT,
     AI_PROVIDER_SCOPE_NOTE,
-    JOKE_SYSTEM_PROMPT,
     FALLBACK_APOLOGIES,
     SHAZAM_CLIP_SECONDS,
     MUSIC_RESULTS_LIMIT,
@@ -83,6 +82,7 @@ from music_client import (
     GeniusApiError,
 )
 from weather_client import extract_weather_city, get_weather_summary
+from joke_bank import get_joke
 
 logging.basicConfig(level=logging.INFO)
 
@@ -108,6 +108,8 @@ awaiting_music_lyrics: set[int] = set()           # ждём фрагмент т
 awaiting_music_shazam: set[int] = set()           # ждём аудио/видео для распознавания (Shazam)
 
 JOKE_REQUEST_RE = re.compile(r"анекдот|шут[а-яё]*|юмор[а-яё]*", re.IGNORECASE)
+recent_jokes: dict[int, list[str]] = {}           # user_id -> недавно рассказанные анекдоты (чтобы не повторяться)
+RECENT_JOKES_LIMIT = 8
 
 image_last_request_at: dict[int, datetime] = {}  # защита от слишком частых запросов картинок
 IMAGE_COOLDOWN_SECONDS = 16  # анонимный доступ Pollinations ограничен ~1 запросом/15 сек
@@ -478,7 +480,7 @@ async def show_features_menu(message: Message):
         )
         return
 
-    await message.answer("🧰 Выбери функцию:", reply_markup=functions_menu_keyboard())
+    await send_menu(message, user_id, "features", "🧰 Выбери функцию:", functions_menu_keyboard())
 
 
 @dp.callback_query(F.data.startswith("feat_"))
@@ -495,22 +497,30 @@ async def process_features_callback(callback):
     await callback.answer()
     target = callback.message
 
+    # Переход на любую другую функцию, кроме самой музыки, — явный выход из поиска музыки.
+    if action != "music":
+        awaiting_music_track.discard(user_id)
+        awaiting_music_lyrics.discard(user_id)
+        awaiting_music_shazam.discard(user_id)
+
     if action == "mode":
         current_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
         modes_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in MODES.values())
-        await target.answer(
+        await send_menu(
+            target, user_id, "mode",
             f"Текущий режим: {current_label}\n\n"
             f"Доступные режимы:\n\n{modes_text}\n\n"
             "Выбери новый режим кнопкой ниже:",
-            reply_markup=mode_keyboard(),
+            mode_keyboard(),
         )
     elif action == "ai_provider":
         current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
         options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
-        await target.answer(
+        await send_menu(
+            target, user_id, "ai_provider",
             f"Текущая модель: {current['label']}\n\n{options_text}\n\n"
             f"{AI_PROVIDER_SCOPE_NOTE}\n\nВыбери модель кнопкой ниже:",
-            reply_markup=ai_provider_keyboard(user_id),
+            ai_provider_keyboard(user_id),
         )
     elif action == "image":
         awaiting_image_prompt.add(user_id)
@@ -525,7 +535,8 @@ async def process_features_callback(callback):
             f"• Длиннее {VIDEO_NOTE_MAX_DURATION_SECONDS} сек? — спрошу, обрезать ли\n"
             "• Спрошу, оставить звук или убрать\n"
             "• Любое соотношение сторон — обрежу по центру до квадрата\n"
-            f"• Вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов)"
+            f"• Вес файла до {VIDEO_NOTE_MAX_FILE_SIZE_MB} МБ (ограничение Telegram для ботов)\n\n"
+            "Можно присылать видео одно за другим — обрабатываю каждое."
         )
     elif action == "voice_ai":
         enabled = db.get_voice_mode(user_id)
@@ -534,16 +545,17 @@ async def process_features_callback(callback):
             status = f"🔊 Сейчас включён: {persona['label']}"
         else:
             status = "💬 Сейчас отвечаю текстом."
-        await target.answer(
+        await send_menu(
+            target, user_id, "voice_ai",
             f"{status}\n\nВыбери манеру общения для голосовых ответов "
             f"(до {VOICE_AI_MAX_SECONDS} секунд):",
-            reply_markup=voice_ai_menu_keyboard(user_id),
+            voice_ai_menu_keyboard(user_id),
         )
     elif action == "music":
         awaiting_music_track.discard(user_id)
         awaiting_music_lyrics.discard(user_id)
         awaiting_music_shazam.discard(user_id)
-        await target.answer("🎵 Как будем искать музыку?", reply_markup=music_menu_keyboard())
+        await send_menu(target, user_id, "music", "🎵 Как будем искать музыку?", music_menu_keyboard())
 
 
 @dp.message(Command("status"))
@@ -719,11 +731,12 @@ async def cmd_mode(message: Message):
     current_label = MODES.get(db.get_user_mode(user_id), MODES["default"])["label"]
     modes_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in MODES.values())
 
-    await message.answer(
+    await send_menu(
+        message, user_id, "mode",
         f"Текущий режим: {current_label}\n\n"
         f"Доступные режимы:\n\n{modes_text}\n\n"
         "Выбери новый режим кнопкой ниже:",
-        reply_markup=mode_keyboard(),
+        mode_keyboard(),
     )
 
 
@@ -975,6 +988,33 @@ async def run_web_search(message: Message, query: str):
     await message.answer(f"🌐 {answer}")
 
 
+def exit_music_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Готово, закончить поиск музыки", callback_data="music_done"),
+    ]])
+
+
+def with_exit_music_row(kb: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    """Добавляет к любой клавиатуре кнопку выхода из режима поиска музыки снизу."""
+    rows = list(kb.inline_keyboard) + [[
+        InlineKeyboardButton(text="✅ Готово, закончить поиск музыки", callback_data="music_done"),
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "music_done")
+async def process_music_done(callback):
+    user_id = callback.from_user.id
+    awaiting_music_track.discard(user_id)
+    awaiting_music_lyrics.discard(user_id)
+    awaiting_music_shazam.discard(user_id)
+    await callback.answer("Вышел из поиска музыки")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
 # --- Поиск музыки (по названию, по словам из песни, распознавание по аудио/видео) ---
 
 @dp.message(Command("music"))
@@ -995,7 +1035,7 @@ async def handle_music_button(message: Message):
     awaiting_music_track.discard(user_id)
     awaiting_music_lyrics.discard(user_id)
     awaiting_music_shazam.discard(user_id)
-    await message.answer("🎵 Как будем искать музыку?", reply_markup=music_menu_keyboard())
+    await send_menu(message, user_id, "music", "🎵 Как будем искать музыку?", music_menu_keyboard())
 
 
 @dp.callback_query(F.data.startswith("music_mode_"))
@@ -1009,21 +1049,36 @@ async def process_music_mode_callback(callback):
     mode = callback.data.removeprefix("music_mode_")
     await callback.answer()
 
+    # На всякий случай сбрасываем все три — активным должен быть только выбранный сейчас режим.
+    awaiting_music_track.discard(user_id)
+    awaiting_music_lyrics.discard(user_id)
+    awaiting_music_shazam.discard(user_id)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
     if mode == "track":
         awaiting_music_track.add(user_id)
         await callback.message.answer(
-            "🔎 Напиши название трека (можно с исполнителем), например: Imagine Dragons Believer"
+            "🔎 Пиши названия треков (можно с исполнителем) — ищу каждый, пока не нажмёшь «Готово». "
+            "Например: Imagine Dragons Believer",
+            reply_markup=exit_music_keyboard(),
         )
     elif mode == "lyrics":
         awaiting_music_lyrics.add(user_id)
         await callback.message.answer(
-            "📝 Напиши строчку или фрагмент текста песни, которую вспомнил"
+            "📝 Пиши строчки или фрагменты текста песен — ищу каждый, пока не нажмёшь «Готово».",
+            reply_markup=exit_music_keyboard(),
         )
     elif mode == "shazam":
         awaiting_music_shazam.add(user_id)
         await callback.message.answer(
-            "🎧 Пришли голосовое сообщение, аудиофайл или видео с фрагментом песни "
-            "(10–15 секунд обычно достаточно, чем чище звук — тем лучше)."
+            "🎧 Присылай голосовые сообщения, аудиофайлы или видео с фрагментами песен — "
+            "распознаю каждый, пока не нажмёшь «Готово» (10–15 секунд обычно достаточно, "
+            "чем чище звук — тем лучше).",
+            reply_markup=exit_music_keyboard(),
         )
 
 
@@ -1037,12 +1092,18 @@ async def run_music_track_search(message: Message, query: str):
     results = await search_track_by_name(query)
 
     if not results:
-        await message.answer("🤷 Ничего не нашёл по этому названию. Попробуй уточнить запрос.")
+        await message.answer(
+            "🤷 Ничего не нашёл по этому названию. Попробуй уточнить запрос, "
+            "или нажми «Готово», если закончил.",
+            reply_markup=exit_music_keyboard(),
+        )
         return
 
-    for track in results:
+    for i, track in enumerate(results):
         caption = f"🎵 {track['title']}\n👤 {track['artist']}"
         kb = music_links_keyboard(track.get("title"), track.get("artist"))
+        if i == len(results) - 1:
+            kb = with_exit_music_row(kb)
 
         if track.get("preview"):
             try:
@@ -1077,20 +1138,27 @@ async def run_music_lyrics_search(message: Message, query: str):
     if results is None:
         await message.answer(
             "⚠️ Поиск по словам из песни пока не настроен администратором бота "
-            "(нужен бесплатный ключ Genius API). Попробуй поиск по названию или Шазам."
+            "(нужен бесплатный ключ Genius API). Попробуй поиск по названию или Шазам.",
+            reply_markup=exit_music_keyboard(),
         )
         return
 
     if not results:
-        await message.answer("🤷 Ничего не нашёл по этим словам. Попробуй другой фрагмент текста.")
+        await message.answer(
+            "🤷 Ничего не нашёл по этим словам. Попробуй другой фрагмент текста, "
+            "или нажми «Готово», если закончил.",
+            reply_markup=exit_music_keyboard(),
+        )
         return
 
     await message.answer("📝 Вот что нашлось по этим словам:")
-    for track in results:
+    for i, track in enumerate(results):
         caption = f"🎵 {track['title']} — {track['artist']}"
         if track.get("url"):
             caption += f"\n📄 Текст: {track['url']}"
         kb = music_links_keyboard(track.get("title"), track.get("artist"))
+        if i == len(results) - 1:
+            kb = with_exit_music_row(kb)
 
         preview = None
         try:
@@ -1153,13 +1221,33 @@ async def run_shazam_recognition(message: Message, file_id: str):
     if not track or not track.get("title"):
         await status_msg.edit_text(
             "🤷 Не удалось распознать трек. Попробуй прислать более чистый и громкий фрагмент "
-            "(10–15 секунд, без сильного постороннего шума)."
+            "(10–15 секунд, без сильного постороннего шума), или нажми «Готово», если закончил.",
+            reply_markup=exit_music_keyboard(),
         )
         return
 
     text = f"🎧 Похоже, это:\n\n🎵 {track['title']}\n👤 {track['artist']}"
-    kb = music_links_keyboard(track.get("title"), track.get("artist"))
-    await status_msg.edit_text(text, reply_markup=kb)
+    kb = with_exit_music_row(music_links_keyboard(track.get("title"), track.get("artist")))
+
+    preview = None
+    try:
+        preview = await find_preview_url(track.get("title"), track.get("artist"))
+    except Exception as e:
+        logging.warning(f"Не удалось найти превью для распознанного трека: {e}")
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    if preview:
+        try:
+            await message.answer_audio(audio=preview, caption=text, reply_markup=kb)
+            return
+        except Exception as e:
+            logging.warning(f"Не удалось отправить превью распознанного трека: {e}")
+
+    await message.answer(text, reply_markup=kb)
 
 
 # --- База знаний (RAG), администрирование ---
@@ -1729,7 +1817,6 @@ async def handle_voice(message: Message):
     voice = message.voice or message.audio
 
     if user_id in awaiting_music_shazam:
-        awaiting_music_shazam.discard(user_id)
         await run_shazam_recognition(message, voice.file_id)
         return
 
@@ -1758,6 +1845,31 @@ async def handle_voice(message: Message):
 
 
 # --- Видео в кружок (Telegram video note) ---
+
+last_menu_message: dict[tuple[int, str], tuple[int, int]] = {}   # (user_id, menu_key) -> (chat_id, message_id)
+
+
+async def send_menu(target, user_id: int, menu_key: str, text: str, reply_markup):
+    """
+    Отправляет инлайн-меню и, если такое же меню (menu_key) уже было открыто раньше
+    в этом чате — убирает кнопки у старой копии, чтобы в чате не копилось несколько
+    активных версий одного и того же меню.
+    target — объект с методом .answer() (Message или callback.message).
+    """
+    prev = last_menu_message.get((user_id, menu_key))
+    if prev:
+        prev_chat_id, prev_message_id = prev
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=prev_chat_id, message_id=prev_message_id, reply_markup=None
+            )
+        except Exception:
+            pass  # старое сообщение уже удалено/изменено/слишком старое — не страшно
+
+    sent = await target.answer(text, reply_markup=reply_markup)
+    last_menu_message[(user_id, menu_key)] = (sent.chat.id, sent.message_id)
+    return sent
+
 
 pending_video_circle: dict[int, dict] = {}  # user_id -> {file_id, duration, chat_id}
 
@@ -1844,7 +1956,6 @@ async def handle_video_to_circle(message: Message):
     user_id = message.from_user.id
 
     if user_id in awaiting_music_shazam:
-        awaiting_music_shazam.discard(user_id)
         await run_shazam_recognition(message, video.file_id)
         return
 
@@ -1975,10 +2086,11 @@ async def show_voice_ai_menu(message: Message):
     else:
         status = "💬 Сейчас отвечаю текстом."
 
-    await message.answer(
+    await send_menu(
+        message, user_id, "voice_ai",
         f"{status}\n\nВыбери манеру общения для голосовых ответов "
         f"(до {VOICE_AI_MAX_SECONDS} секунд):",
-        reply_markup=voice_ai_menu_keyboard(user_id),
+        voice_ai_menu_keyboard(user_id),
     )
 
 
@@ -2053,10 +2165,11 @@ async def show_ai_provider_menu(message: Message):
     current = AI_PROVIDERS.get(db.get_ai_provider(user_id), AI_PROVIDERS[AI_PROVIDER_DEFAULT])
     options_text = "\n\n".join(f"{info['label']}\n{info['description']}" for info in AI_PROVIDERS.values())
 
-    await message.answer(
+    await send_menu(
+        message, user_id, "ai_provider",
         f"Текущая модель: {current['label']}\n\n{options_text}\n\n"
         f"{AI_PROVIDER_SCOPE_NOTE}\n\nВыбери модель кнопкой ниже:",
-        reply_markup=ai_provider_keyboard(user_id),
+        ai_provider_keyboard(user_id),
     )
 
 
@@ -2238,12 +2351,14 @@ async def process_user_query(message: Message, query_text: str):
                 system_prompt += voice_instruction
             answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
     elif JOKE_REQUEST_RE.search(query_text):
-        # Явный запрос анекдота/шутки — используем отдельный "прокачанный" промпт
-        # с примерами, независимо от того, какой режим ответа сейчас выбран.
-        system_prompt = JOKE_SYSTEM_PROMPT
-        if voice_enabled:
-            system_prompt += voice_instruction
-        answer = await call_ai(query_text, history, system_prompt, user_id, is_sub_like)
+        # Явный запрос анекдота/шутки — берём готовый анекдот из курируемой базы
+        # (joke_bank.py), а не генерируем ИИ с нуля: модели плохо сочиняют реально
+        # смешные и понятные анекдоты на русском, особенно без опоры на готовый текст.
+        exclude = set(recent_jokes.get(user_id, []))
+        answer = get_joke(query_text, exclude_texts=exclude)
+        recent_jokes.setdefault(user_id, [])
+        recent_jokes[user_id].append(answer)
+        recent_jokes[user_id] = recent_jokes[user_id][-RECENT_JOKES_LIMIT:]
     else:
         system_prompt = MODES.get(mode_key, MODES["default"])["prompt"]
         if voice_enabled:
@@ -2333,12 +2448,10 @@ async def handle_text(message: Message):
         return
 
     if user_id in awaiting_music_track:
-        awaiting_music_track.discard(user_id)
         await run_music_track_search(message, message.text)
         return
 
     if user_id in awaiting_music_lyrics:
-        awaiting_music_lyrics.discard(user_id)
         await run_music_lyrics_search(message, message.text)
         return
 
