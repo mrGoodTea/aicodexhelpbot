@@ -102,6 +102,9 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # currency: 'XTR' (Telegram Stars, как раньше) или 'RUB' (оплата картой через ЮKassa).
+        # Для RUB значение amount_stars хранит сумму в копейках (так её отдаёт Telegram API).
+        _add_column_if_missing(conn, "payments", "currency", "TEXT DEFAULT 'XTR'")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS kb_chunks (
@@ -333,7 +336,7 @@ def get_top_referrers(limit: int = 10) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def activate_subscription(user_id: int, charge_id: str, amount_stars: int):
+def activate_subscription(user_id: int, charge_id: str, amount_stars: int, currency: str = "XTR"):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         now = datetime.now()
@@ -349,8 +352,8 @@ def activate_subscription(user_id: int, charge_id: str, amount_stars: int):
             (new_until.isoformat(), user_id),
         )
         conn.execute(
-            "INSERT INTO payments (user_id, amount_stars, charge_id) VALUES (?, ?, ?)",
-            (user_id, amount_stars, charge_id),
+            "INSERT INTO payments (user_id, amount_stars, charge_id, currency) VALUES (?, ?, ?, ?)",
+            (user_id, amount_stars, charge_id, currency),
         )
         return new_until
 

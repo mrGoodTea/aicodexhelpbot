@@ -28,6 +28,8 @@ from pypdf import PdfReader
 from config import (
     BOT_TOKEN,
     SUBSCRIPTION_PRICE_STARS,
+    YOOKASSA_PROVIDER_TOKEN,
+    SUBSCRIPTION_PRICE_RUB,
     SUBSCRIPTION_DAYS,
     TRIAL_DAYS,
     TRIAL_GRANT_MAX_DAYS,
@@ -41,7 +43,6 @@ from config import (
     MODES,
     ADMIN_USERNAMES,
     OWNER_USERNAME,
-    STREAK_BONUS_EVERY_DAYS,
     STREAK_BONUS_REQUESTS,
     GOLDEN_QUERY_INTERVAL_DAYS,
     DYNAMIC_DISCOUNT_ACTIVE_DAYS,
@@ -69,7 +70,6 @@ from config import (
     AI_PROVIDER_SCOPE_NOTE,
     FALLBACK_APOLOGIES,
     SHAZAM_CLIP_SECONDS,
-    MUSIC_RESULTS_LIMIT,
 )
 import database as db
 from groq_client import ask_ai, ask_with_web_search, analyze_image, transcribe_voice
@@ -179,11 +179,14 @@ def main_menu_keyboard(full_access: bool, golden_available: bool = False, userna
 
 
 def buy_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="buy_subscription")]
-        ]
-    )
+    buttons = [
+        [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="buy_subscription_stars")],
+    ]
+    if YOOKASSA_PROVIDER_TOKEN:
+        buttons.append(
+            [InlineKeyboardButton(text="💳 Оплатить картой (ЮKassa)", callback_data="buy_subscription_rub")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def mode_keyboard() -> InlineKeyboardMarkup:
@@ -267,11 +270,20 @@ def format_time_left(expires_at_iso: str) -> str:
 
 
 def price_with_discount(user_id: int) -> tuple[int, int]:
-    """Возвращает (цена_со_скидкой, процент_скидки)."""
+    """Возвращает (цена_со_скидкой_в_Stars, процент_скидки)."""
     discount = db.get_purchase_discount_percent(user_id)
     price = SUBSCRIPTION_PRICE_STARS
     if discount > 0:
         price = max(1, round(SUBSCRIPTION_PRICE_STARS * (1 - discount / 100)))
+    return price, discount
+
+
+def price_with_discount_rub(user_id: int) -> tuple[int, int]:
+    """Возвращает (цена_со_скидкой_в_рублях, процент_скидки) — та же скидка, что и для Stars."""
+    discount = db.get_purchase_discount_percent(user_id)
+    price = SUBSCRIPTION_PRICE_RUB
+    if discount > 0:
+        price = max(1, round(SUBSCRIPTION_PRICE_RUB * (1 - discount / 100)))
     return price, discount
 
 
@@ -651,6 +663,13 @@ async def cmd_buy(message: Message):
     if discount > 0:
         price_line = f"{price} ⭐ вместо {SUBSCRIPTION_PRICE_STARS} ⭐ (скидка {discount}%)"
 
+    price_rub, _ = price_with_discount_rub(user_id)
+    price_rub_line = f"{SUBSCRIPTION_PRICE_RUB} ₽"
+    if discount > 0:
+        price_rub_line = f"{price_rub} ₽ вместо {SUBSCRIPTION_PRICE_RUB} ₽ (скидка {discount}%)"
+    if YOOKASSA_PROVIDER_TOKEN:
+        price_line += f" или {price_rub_line} картой"
+
     modes_text = "\n\n".join(
         f"{info['label']}\n{info['description']}" for key, info in MODES.items() if key != "default"
     )
@@ -782,7 +801,7 @@ async def handle_golden_button(message: Message):
     )
 
 
-@dp.callback_query(F.data == "buy_subscription")
+@dp.callback_query(F.data == "buy_subscription_stars")
 async def process_buy_callback(callback):
     user_id = callback.from_user.id
     price, discount = price_with_discount(user_id)
@@ -801,6 +820,32 @@ async def process_buy_callback(callback):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "buy_subscription_rub")
+async def process_buy_rub_callback(callback):
+    user_id = callback.from_user.id
+
+    if not YOOKASSA_PROVIDER_TOKEN:
+        await callback.answer(
+            "Оплата картой временно недоступна, попробуй оплатить Stars.", show_alert=True
+        )
+        return
+
+    price_rub, discount = price_with_discount_rub(user_id)
+
+    await callback.message.answer_invoice(
+        title="Подписка на бота",
+        description=(
+            f"Безлимитные запросы на {SUBSCRIPTION_DAYS} дней"
+            + (f" (скидка {discount}%)" if discount else "")
+        ),
+        payload=f"subscription_{user_id}",
+        currency="RUB",
+        prices=[LabeledPrice(label="Подписка", amount=price_rub * 100)],  # сумма в копейках
+        provider_token=YOOKASSA_PROVIDER_TOKEN,
+    )
+    await callback.answer()
+
+
 @dp.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -815,6 +860,7 @@ async def process_successful_payment(message: Message):
         user_id=user_id,
         charge_id=payment.telegram_payment_charge_id,
         amount_stars=payment.total_amount,
+        currency=payment.currency,
     )
     db.clear_discount(user_id)
 

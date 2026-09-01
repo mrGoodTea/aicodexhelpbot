@@ -44,6 +44,15 @@ GROQ_SEARCH_MODEL = os.getenv("GROQ_SEARCH_MODEL", "groq/compound-mini")        
 # --- Лимиты и подписка ---
 FREE_REQUESTS_PER_DAY = int(os.getenv("FREE_REQUESTS_PER_DAY", "30"))
 SUBSCRIPTION_PRICE_STARS = int(os.getenv("SUBSCRIPTION_PRICE_STARS", "150"))
+
+# --- Оплата картой через ЮKassa (Telegram Payments) ---
+# YOOKASSA_PROVIDER_TOKEN получается через @BotFather: /mybots -> выбрать бота ->
+# Bot Settings -> Payments -> ЮKassa -> подключить свой аккаунт ЮKassa (нужна
+# регистрация как самозанятый/ИП/юрлицо в ЮKassa — это требование самой ЮKassa
+# для приёма платежей картой, не наше). BotFather выдаст provider_token — его сюда.
+# Пока токен не задан, кнопка оплаты картой не показывается пользователю.
+YOOKASSA_PROVIDER_TOKEN = os.getenv("YOOKASSA_PROVIDER_TOKEN", "")
+SUBSCRIPTION_PRICE_RUB = int(os.getenv("SUBSCRIPTION_PRICE_RUB", "100"))
 SUBSCRIPTION_DAYS = int(os.getenv("SUBSCRIPTION_DAYS", "30"))
 
 # --- Пробный период для новых пользователей ---
